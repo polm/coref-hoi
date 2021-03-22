@@ -4,8 +4,8 @@ from __future__ import print_function
 
 import numpy as np
 from collections import Counter
-from sklearn.utils.linear_assignment_ import linear_assignment
-from scipy.optimize import linear_sum_assignment
+#from sklearn.utils.linear_assignment_ import linear_assignment
+from scipy.optimize import linear_sum_assignment as linear_assignment
 
 
 def f1(p_num, p_den, r_num, r_den, beta=1):
@@ -128,7 +128,7 @@ def ceafe(clusters, gold_clusters):
     matching = linear_assignment(-scores)
     # matching2 = linear_sum_assignment(-scores)
     # matching2 = np.transpose(np.asarray(matching2))
-    similarity = sum(scores[matching[:, 0], matching[:, 1]])
+    similarity = sum(scores[matching[0], matching[1]])
     return similarity, len(clusters), similarity, len(gold_clusters)
 
 
