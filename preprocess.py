@@ -184,6 +184,11 @@ def split_into_segments(document_state: DocumentState, max_seg_len, constraints1
 
 def get_document(doc_key, doc_lines, language, seg_len, tokenizer):
     """ Process raw input to finalized documents """
+    # doc_key: genre, a string
+    # doc_lines: lines in the conll format sense; each line a token
+    # language: a string like 'english'
+    # seg_len: hyperparameter, default 512
+    # tokenizer: actual bert tokenizer object
     document_state = DocumentState(doc_key)
     word_idx = -1
 
