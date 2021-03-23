@@ -18,7 +18,6 @@ from util import initialize_config, flatten
 from tensorize import CorefDataProcessor
 from predict import get_document_from_string
 
-
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(antecedent_idx, antecedent_scores):
     """Get the ID of the antecedent for each span. -1 if no antecedent."""
@@ -125,6 +124,10 @@ def convert_coref_outputs(
 
     clusters, mention2cluster, ants = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
     #TODO actually implement backprop
+
+    # clusters here are actually wordpiece token indexes, we should convert
+    # those to spaCy token indexes
+
     return clusters, lambda x: []
 
 def initialize_model(config_name, device, starter=None):
@@ -137,12 +140,18 @@ def initialize_model(config_name, device, starter=None):
     return coref
 
 @thinc.registry.layers("coref_model.v1")
-def Coref(name, saved_model=None) -> Model[List, List[List[Tuple]]]:
+def CorefCore(name, saved_model=None) -> Model[List, List[List[Tuple]]]:
     return PyTorchWrapper(
             initialize_model(name, "cuda:0", saved_model),
             convert_inputs=convert_coref_inputs,
             convert_outputs=convert_coref_outputs)
 
+@registry.architectures("spacy.Coref.v0")
+def WrappedCoref(config_name, model_path=None) -> Model:
+    return chain(
+            CorefPreprocessor(config_name),
+            CorefCore(config_name, model_path)
+            )
 
 if __name__ == "__main__":
     #segment_length = 128
@@ -153,7 +162,7 @@ if __name__ == "__main__":
 
     model = chain(
             CorefPreprocessor(config_name),
-            Coref(config_name, model_path)
+            CorefCore(config_name, model_path)
             )
     out, backprop = model(text, is_train = False)
     ic(out)
