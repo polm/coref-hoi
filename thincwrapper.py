@@ -13,32 +13,6 @@ from predict import get_document_from_string
 
 from icecream import ic
 
-text = "John Smith reported the news from London today, he said it was raining in the city."
-
-seg_len = 128 # length of segments for bert
-nlp = spacy.blank("en")
-nlp.add_pipe("sentencizer")
-config_name = "bert_small"
-# load config as a dict
-config = initialize_config(config_name) 
-data_processor = CorefDataProcessor(config)
-bert_tokenizer = data_processor.tokenizer
-
-device = "cuda:0"
-model_path = "./data/bert_small/model_Mar21_19-13-39_65000.bin"
-# XXX not sure why this is cpu
-sdict = torch.load(model_path, map_location=torch.device("cpu"))
-
-coref = CorefModel(config, device)
-coref.load_state_dict(sdict, strict=False)
-model = PyTorchWrapper(coref)
-
-# this uses spaCy and BERT tokenizers to create artificial conll training data
-doc = get_document_from_string(text, seg_len, bert_tokenizer, nlp)
-# this creates the basic tensor repr of the input, including all metadata
-# for raw text input metadata is mostly empty
-tensor_examples, _ = data_processor.get_tensor_examples_from_custom_input([doc])
-
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(antecedent_idx, antecedent_scores):
     """Get the ID of the antecedent for each span. -1 if no antecedent."""
@@ -88,33 +62,61 @@ def get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_sc
     predicted_clusters = [tuple(c) for c in predicted_clusters]
     return predicted_clusters, mention_to_cluster_id, predicted_antecedents
 
-# why is the genre doc_key here? It's not used anywhere
-for (doc_key, ex) in tensor_examples:
-    # first do the actual prediction
-    ex = ex[:7]
-    predictions, backprop = model(ex, is_train=False)
-    _, _, _, span_starts, span_ends, ant_idx, ant_scores = predictions
+if __name__ == "__main__":
+    text = "John Smith reported the news from London today, he said it was raining in the city."
 
-    # make everything into lists
-    span_starts = span_starts.tolist()
-    span_ends = span_ends.tolist()
-    ant_idx = ant_idx.tolist()
-    ant_scores = ant_scores.tolist()
-    ic(ant_idx)
-    ic(ant_scores)
+    seg_len = 128 # length of segments for bert
+    nlp = spacy.blank("en")
+    nlp.add_pipe("sentencizer")
+    config_name = "bert_small"
+    # load config as a dict
+    config = initialize_config(config_name) 
+    data_processor = CorefDataProcessor(config)
+    bert_tokenizer = data_processor.tokenizer
 
-    # convert the predictions into usable data
-    ic(span_starts, span_ends)
-    clusters, mention2cluster, ants = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
-    ic(clusters)
-    ic(mention2cluster)
-    ic(ants)
+    device = "cuda:0"
+    model_path = "./data/bert_small/model_Mar21_19-13-39_65000.bin"
+    # XXX not sure why this is cpu
+    sdict = torch.load(model_path, map_location=torch.device("cpu"))
 
-    # render the predictions, each cluster a list.
-    subtokens = flatten(doc["sentences"])
-    for cluster in clusters:
-        mentions_str = [' '.join(subtokens[m[0]:m[1]+1]) for m in cluster]
-        mentions_str = [m.replace(' ##', '') for m in mentions_str]
-        mentions_str = [m.replace('##', '') for m in mentions_str]
-        print(mentions_str)  # Print out strings
+    coref = CorefModel(config, device)
+    coref.load_state_dict(sdict, strict=False)
+    model = PyTorchWrapper(coref)
+
+    # this uses spaCy and BERT tokenizers to create artificial conll training data
+    doc = get_document_from_string(text, seg_len, bert_tokenizer, nlp)
+    # this creates the basic tensor repr of the input, including all metadata
+    # for raw text input metadata is mostly empty
+    tensor_examples, _ = data_processor.get_tensor_examples_from_custom_input([doc])
+
+
+    # why is the genre doc_key here? It's not used anywhere
+    for (doc_key, ex) in tensor_examples:
+        # first do the actual prediction
+        ex = ex[:7]
+        predictions, backprop = model(ex, is_train=False)
+        _, _, _, span_starts, span_ends, ant_idx, ant_scores = predictions
+
+        # make everything into lists
+        span_starts = span_starts.tolist()
+        span_ends = span_ends.tolist()
+        ant_idx = ant_idx.tolist()
+        ant_scores = ant_scores.tolist()
+        ic(ant_idx)
+        ic(ant_scores)
+
+        # convert the predictions into usable data
+        ic(span_starts, span_ends)
+        clusters, mention2cluster, ants = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
+        ic(clusters)
+        ic(mention2cluster)
+        ic(ants)
+
+        # render the predictions, each cluster a list.
+        subtokens = flatten(doc["sentences"])
+        for cluster in clusters:
+            mentions_str = [' '.join(subtokens[m[0]:m[1]+1]) for m in cluster]
+            mentions_str = [m.replace(' ##', '') for m in mentions_str]
+            mentions_str = [m.replace('##', '') for m in mentions_str]
+            print(mentions_str)  # Print out strings
 
