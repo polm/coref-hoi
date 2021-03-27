@@ -65,6 +65,7 @@ def get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_sc
         mention_to_cluster_id[mention] = antecedent_cluster_id
 
     predicted_clusters = [tuple(c) for c in predicted_clusters]
+    # XXX it should be fine to only return the first value here
     return predicted_clusters, mention_to_cluster_id, predicted_antecedents
 
 
@@ -73,8 +74,10 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
     #XXX A limitation of coref-hoi is that it calls forward once per doc
     config = initialize_config(name)
     seg_len = config["max_segment_len"]
+    # this includes a bert tokenizer
     data_processor = CorefDataProcessor(config)
 
+    # XXX this should be a listener
     sentencizer = spacy.blank("en")
     sentencizer.add_pipe("sentencizer")
 
@@ -93,7 +96,10 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
         out = []
         for (doc_key, ex) in tensor_examples:
             out.append(ex[:7])
-        return out, lambda x: []
+        ic(out)
+        out = tensor_examples[0][1:8]
+        ic(out)
+        return (out[0], doc), lambda x: []
 
     return Model("coref_preprocessor", forward, attrs={
         "data_processor": data_processor,
@@ -103,8 +109,11 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
 
 def convert_coref_inputs(model, inputs, is_train):
     kwargs = {}
-    # XXX hack because this can't actually be batched
-    inputs = inputs[0]
+    # doc is not used here, but later for token alignment
+    out, doc = inputs
+    ic(out)
+    inputs = out
+    #inputs = inputs[0]
     return ArgsKwargs(args=inputs, kwargs=kwargs), lambda dX: []
 
 def convert_coref_outputs(
@@ -114,6 +123,11 @@ def convert_coref_outputs(
         is_train: bool
         ) -> Tuple[List[List[Tuple[int,int]]], Callable]:
     inputs, outputs = inputs_outputs
+    _, doc = inputs
+    ic(inputs)
+    ic(outputs)
+    # XXX not sure why this is necessary, where is the extra thing coming from?
+    outputs = outputs[0]
     _, _, _, span_starts, span_ends, ant_idx, ant_scores = outputs
 
     # put everything on cpu
@@ -126,9 +140,22 @@ def convert_coref_outputs(
     #TODO actually implement backprop
 
     # clusters here are actually wordpiece token indexes, we should convert
-    # those to spaCy token indexes
+    # those to spaCy token indexes / spans
+    ic(clusters)
+    ic(doc['subtoken_map'])
+    ic(doc['tokens'])
+    out = []
+    stm = doc['subtoken_map']
+    tokens = doc['tokens']
+    for cluster in clusters:
+        cmap = []
+        for start, finish in cluster:
+            # these are actual token indices
+            # XXX check how the actual token indices are generated
+            cmap.append( (stm[start], stm[finish]+1) )
+        out.append(cmap)
 
-    return clusters, lambda x: []
+    return out, lambda x: []
 
 def initialize_model(config_name, device, starter=None):
     config = initialize_config(config_name)

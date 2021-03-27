@@ -9,5 +9,5 @@ nlp.add_pipe("coref")
 text = "John called from London, he says it's raining in the city."
 doc = nlp(text)
 
-for key, val in doc.spans:
+for key, val in doc.spans.items():
     print(key, val)

@@ -79,9 +79,10 @@ class CoreferenceResolver(TrainablePipe):
     def set_annotations(self, docs: Iterable[Doc], clusters_by_doc) -> None:
         """Set the clusters on docs using predictions."""
 
-        ic(self.model.layers[0].attrs["bert_tokenizer"])
 
         for doc, clusters in zip(docs, clusters_by_doc):
+            clusters, _ = clusters # pop off backpropr (shouldn't be done here??)
+            ic(clusters)
             for ii, cluster in enumerate(clusters):
                 key = self.span_cluster_prefix + "_" + str(ii)
                 if key in doc.spans:
@@ -90,5 +91,8 @@ class CoreferenceResolver(TrainablePipe):
                                      "This is likely a bug in spaCy.")
 
                 # TODO this doesn't work because these are wordpiece indices
-                doc.spans[key] = cluster
+                doc.spans[key] = []
+                for mention in cluster:
+                    ic(mention)
+                    doc.spans[key].append(doc[mention[0]:mention[1]])
 
