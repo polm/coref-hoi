@@ -137,8 +137,7 @@ def convert_coref_outputs(
     clusters = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
     #TODO actually implement backprop
 
-    # clusters here are actually wordpiece token indexes, we should convert
-    # those to spaCy token indexes / spans
+    # convert the wordpiece indices back to token indices
     out = []
     stm = doc['subtoken_map']
     tokens = doc['tokens']
@@ -146,7 +145,6 @@ def convert_coref_outputs(
         cmap = []
         for start, finish in cluster:
             # these are actual token indices
-            # XXX check how the actual token indices are generated
             cmap.append( (stm[start], stm[finish]+1) )
         out.append(cmap)
 
