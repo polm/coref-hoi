@@ -9,8 +9,6 @@ from spacy.language import Language
 from spacy.vocab import Vocab
 from wasabi import Printer
 
-from icecream import ic
-
 default_config = """
 [model]
 @architectures = "spacy.Coref.v0"
@@ -68,7 +66,6 @@ class CoreferenceResolver(TrainablePipe):
 
     def predict(self, docs: Iterable[Doc]):
         """Apply the model without modifying the docs."""
-        #XXX This will rely on the bad interface we have now
 
         clusters_by_doc = []
         for i, doc in enumerate(docs):
@@ -82,7 +79,6 @@ class CoreferenceResolver(TrainablePipe):
 
         for doc, clusters in zip(docs, clusters_by_doc):
             clusters, _ = clusters # pop off backpropr (shouldn't be done here??)
-            ic(clusters)
             for ii, cluster in enumerate(clusters):
                 key = self.span_cluster_prefix + "_" + str(ii)
                 if key in doc.spans:
@@ -90,9 +86,7 @@ class CoreferenceResolver(TrainablePipe):
                                      "documents provided to the 'coref' component. "
                                      "This is likely a bug in spaCy.")
 
-                # TODO this doesn't work because these are wordpiece indices
                 doc.spans[key] = []
                 for mention in cluster:
-                    ic(mention)
                     doc.spans[key].append(doc[mention[0]:mention[1]])
 

@@ -11,7 +11,6 @@ import thinc
 import torch
 import numpy as np
 
-from icecream import ic
 
 from model import CorefModel
 from util import initialize_config, flatten
@@ -93,12 +92,7 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
                         sentencizer)
         tensor_examples, _ = data_processor.get_tensor_examples_from_custom_input([doc])
        
-        out = []
-        for (doc_key, ex) in tensor_examples:
-            out.append(ex[:7])
-        ic(out)
         out = tensor_examples[0][1:8]
-        ic(out)
         return (out[0], doc), lambda x: []
 
     return Model("coref_preprocessor", forward, attrs={
@@ -111,10 +105,7 @@ def convert_coref_inputs(model, inputs, is_train):
     kwargs = {}
     # doc is not used here, but later for token alignment
     out, doc = inputs
-    ic(out)
-    inputs = out
-    #inputs = inputs[0]
-    return ArgsKwargs(args=inputs, kwargs=kwargs), lambda dX: []
+    return ArgsKwargs(args=out, kwargs=kwargs), lambda dX: []
 
 def convert_coref_outputs(
         model: Model,
@@ -124,8 +115,6 @@ def convert_coref_outputs(
         ) -> Tuple[List[List[Tuple[int,int]]], Callable]:
     inputs, outputs = inputs_outputs
     _, doc = inputs
-    ic(inputs)
-    ic(outputs)
     # XXX not sure why this is necessary, where is the extra thing coming from?
     outputs = outputs[0]
     _, _, _, span_starts, span_ends, ant_idx, ant_scores = outputs
@@ -141,9 +130,6 @@ def convert_coref_outputs(
 
     # clusters here are actually wordpiece token indexes, we should convert
     # those to spaCy token indexes / spans
-    ic(clusters)
-    ic(doc['subtoken_map'])
-    ic(doc['tokens'])
     out = []
     stm = doc['subtoken_map']
     tokens = doc['tokens']
@@ -181,7 +167,7 @@ def WrappedCoref(config_name, model_path=None) -> Model:
             )
 
 if __name__ == "__main__":
-    #segment_length = 128
+    from icecream import ic
     config_name = "bert_small"
     model_path = "./data/bert_small/model_Mar21_19-13-39_65000.bin"
 
