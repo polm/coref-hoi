@@ -156,8 +156,7 @@ def initialize_model(config_name, device, starter=None):
     config = initialize_config(config_name)
     coref = CorefModel(config, device)
     if starter:
-        #XXX cpu may not be necessary here?
-        sdict = torch.load(starter, map_location=torch.device("cpu"))
+        sdict = torch.load(starter)
         coref.load_state_dict(sdict, strict=False)
     return coref
 
