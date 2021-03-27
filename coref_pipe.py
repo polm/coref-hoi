@@ -69,7 +69,7 @@ class CoreferenceResolver(TrainablePipe):
 
         clusters_by_doc = []
         for i, doc in enumerate(docs):
-            clusters = self.model(doc.text, is_train=False)
+            clusters = self.model(doc, is_train=False)
             clusters_by_doc.append(clusters)
         return clusters_by_doc
 

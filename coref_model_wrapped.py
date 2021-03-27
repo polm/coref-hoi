@@ -15,7 +15,7 @@ import numpy as np
 from model import CorefModel
 from util import initialize_config, flatten
 from tensorize import CorefDataProcessor
-from predict import get_document_from_string
+from preprocess import get_document
 
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(antecedent_idx, antecedent_scores):
@@ -67,6 +67,21 @@ def get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_sc
     # XXX it should be fine to only return the first value here
     return predicted_clusters, mention_to_cluster_id, predicted_antecedents
 
+def make_conll_lines(doc, genre="nw"):
+    """Convert a doc into the conll line-based format.
+
+    This is weird but it's used internally by the coref model. Factored out of
+    `get_document_from_string`.
+    """
+    doc_lines = []
+
+    for token in doc:
+        cols = [genre] + ['-'] * 11
+        cols[3] = token.text
+        doc_lines.append('\t'.join(cols))
+        if token.is_sent_end:
+            doc_lines.append('\n')
+    return doc_lines
 
 @thinc.registry.layers("coref_preprocessor.v1")
 def CorefPreprocessor(name: str) -> Model[str, List]:
@@ -76,20 +91,17 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
     # this includes a bert tokenizer
     data_processor = CorefDataProcessor(config)
 
-    # XXX this should be a listener
-    sentencizer = spacy.blank("en")
-    sentencizer.add_pipe("sentencizer")
-
-    def forward(model, inputs: str, is_train: bool):
+    def forward(model, inputs: Doc, is_train: bool):
         data_processor = model.attrs["data_processor"]
         bert_tokenizer = model.attrs["bert_tokenizer"]
-        sentencizer = model.attrs["sentencizer"]
 
-        doc = get_document_from_string(
-                        inputs,
-                        seg_len,
-                        bert_tokenizer,
-                        sentencizer)
+        conll_lines = make_conll_lines(inputs)
+
+        # training data has genres so we have to provide something
+        # genres aren't relevant to input data though so just use default
+        genre = "nw" # default genre
+        doc = get_document("nw", conll_lines, 'english', seg_len, bert_tokenizer)
+
         tensor_examples, _ = data_processor.get_tensor_examples_from_custom_input([doc])
        
         out = tensor_examples[0][1:8]
@@ -98,7 +110,7 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
     return Model("coref_preprocessor", forward, attrs={
         "data_processor": data_processor,
         "bert_tokenizer": data_processor.tokenizer,
-        "sentencizer": sentencizer})
+        })
 
 
 def convert_coref_inputs(model, inputs, is_train):
