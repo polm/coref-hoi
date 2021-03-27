@@ -35,8 +35,6 @@ def get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_sc
     return values:
 
     clusters: a list of spans (i, j) that are a cluster
-    mention2cluster: a mapping of spans (i, j) to cluster ids
-    ants: a list of antecedent ids for each span.
 
     Note that not all spans will be in the final output; spans with no
     antecedent or referrent are omitted from clusters and mention2cluster.
@@ -64,8 +62,7 @@ def get_predicted_clusters(span_starts, span_ends, antecedent_idx, antecedent_sc
         mention_to_cluster_id[mention] = antecedent_cluster_id
 
     predicted_clusters = [tuple(c) for c in predicted_clusters]
-    # XXX it should be fine to only return the first value here
-    return predicted_clusters, mention_to_cluster_id, predicted_antecedents
+    return predicted_clusters
 
 def make_conll_lines(doc, genre="nw"):
     """Convert a doc into the conll line-based format.
@@ -137,7 +134,7 @@ def convert_coref_outputs(
     ant_idx = ant_idx.tolist()
     ant_scores = ant_scores.tolist()
 
-    clusters, mention2cluster, ants = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
+    clusters = get_predicted_clusters(span_starts, span_ends, ant_idx, ant_scores)
     #TODO actually implement backprop
 
     # clusters here are actually wordpiece token indexes, we should convert
