@@ -49,7 +49,7 @@ commands:
       # XXX note this can take 20m
       - "bash assets/conll-2012/v3/scripts/skeleton2conll.sh -D ${vars.ontonotes}/data/files/data assets/conll-2012"
       # This model expects all the data to be in single files, so prep that
-      - "rm assets/*._gold_conll"
+      - "rm -f assets/*._gold_conll"
       - cat assets/conll-2012/v4/data/development/data/english/annotations/*/*/*/*.v4_gold_conll >> assets/dev.english.v4_gold_conll
       - cat assets/conll-2012/v4/data/train/data/english/annotations/*/*/*/*.v4_gold_conll >> assets/train.english.v4_gold_conll
       - cat assets/conll-2012/v4/data/test/data/english/annotations/*/*/*/*.v4_gold_conll >> assets/test.english.v4_gold_conll
