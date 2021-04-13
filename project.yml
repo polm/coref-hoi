@@ -10,15 +10,13 @@ vars:
   train_file: assets/train.english.v4_gold_conll
   trained_model: blarg
   ontonotes: /mnt/data/ontonotes
-  
 
 directories: ["data", "data/conll-2012", "data/bert_small"]
 
 assets:
   - dest: "assets/conll2012.tar.gz"
-    url: "file:///mnt/data/conll2012/conll2012-coref.tar.gz"
+    url: "gs://galaxy-state/conll2012-coref/conll2012-coref.tar.gz"
     description: "CoNLL Annotations"
-
 
 workflows:
   all_gpu:
