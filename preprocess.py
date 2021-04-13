@@ -201,6 +201,10 @@ def get_document(doc_key, doc_lines, language, seg_len, tokenizer):
             assert len(row) >= 12
             word_idx += 1
             word = normalize_word(row[3], language)
+            # XXX this is a little weird. The individual spaCy token is fed to BERT.
+            # This means BERT can't combine multiple spaCy tokens ever, and input may
+            # differ from when it's applied to the whole sentence.
+            # Ah, actually this is the same as HuggingFace's defaults.
             subtokens = tokenizer.tokenize(word)
             document_state.tokens.append(word)
             document_state.token_end += [False] * (len(subtokens) - 1) + [True]
