@@ -5,7 +5,9 @@ from thinc.api import list2ragged, reduce_mean, ragged2list
 from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat
 import spacy
 from spacy.tokens import Doc, Span
-from typing import cast
+from typing import cast, List
+
+from collections import namedtuple
 
 from icecream import ic
 
@@ -89,11 +91,11 @@ def span_embeddings_forward(model, inputs: Doc, is_train):
 
 #XXX would it make sense to have the other model just be inside this one?
 def build_antecedent_selector(
-        mention_limit: int,  # maybe this and the next one should be a union?
-        mention_ratio: float, 
-        antecedent_limit: int, 
         mention_scorer: Model[Floats2d, Floats1d],
         dim: int,
+        antecedent_limit: int, 
+        mention_limit: int,  # maybe this and the next one should be a union?
+        mention_ratio: float = 1.0, 
         dropout: float = 0.3,
         ) -> Model[Mentions, Pairs]:
     # TODO take size as a param or something
@@ -116,57 +118,52 @@ def build_antecedent_selector(
             )
 
 def antecedent_forward(model, inputs: Mentions, is_train):
-    # each row of input is a span
-
-
-    # calculate span scores
     xp = model.ops.xp
-    # this should have backprop
     mention_scorer = model.get_ref("mention_scorer")
-
     mention_scores, _ = mention_scorer(inputs.vecs, is_train)
-    #ic(inputs.vecs.shape, inputs.vecs)
-    #ic(mention_scores.shape, mention_scores)
+
     # pick top spans
     top_mentions = xp.argsort(-1 * mention_scores).flatten()
-    ic(top_mentions)
+
     # num_top_spans in old code
     top_span_limit = model.attrs["mention_limit"]
-    # XXX need to have token indexes here still...
-    starts = inputs.idxs.one
-    ends = inputs.idxs.two
-    selected = select_non_crossing_spans(top_mentions, starts, ends, top_span_limit)
+
+    #XXX this is kind of a weird step. They drop from GPU to CPU in the
+    # coref-hoi code, and I'm not sure how this would look correctly in
+    # thinc.
+
+    # Get only valid spans; (spans [like) this] are not allowed
+    selected = select_non_crossing_spans(top_mentions, 
+            inputs.idxs.one,
+            inputs.idxs.two,
+            top_span_limit)
     top_scores = mention_scores[selected]
     top_vectors = inputs.vecs[selected]
 
-    # TODO this is the smaller of a hyperparameter or (hyperparameter * word in doc)
-    #
-    #ic(inputs.vecs)
     # max_top_antecedents in old code
-    ant_limit = min(inputs.vecs.shape[0], model.attrs["antecedent_limit"])
-    ant_limit = min(ant_limit, top_span_limit) # can't have a higher ant limit than spans we check
+    ant_limit = min(
+            inputs.vecs.shape[0] * model.attrs["mention_ratio"],
+            model.attrs["antecedent_limit"],
+            # can't have a higher ant limit than spans we check
+            top_span_limit)
 
     # create a mask so that antecedents must come before referrents
-    # XXX following manipulations should probably use ops
     top_span_range = xp.arange(top_span_limit) 
     offsets = xp.expand_dims(top_span_range, 1) - xp.expand_dims(top_span_range, 0)
-    mask = (offsets >= 1) 
-    mask = xp.float64(mask)
-    #ic(mask)
+    mask = xp.float64(offsets >= 1) 
 
     pairwise_score_sum = xp.expand_dims(top_scores, 1) + xp.expand_dims(top_scores, 0)
     dropout = model.get_ref("dropout")
     coarse_bilinear = model.get_ref("coarse_bilinear")
     #XXX make this a chain
     source_span_emb, source_backprop = coarse_bilinear(top_vectors, is_train)
-    target_span_emb, target_backprop = dropout(xp.transpose(top_vectors), False)
+    target_span_emb, target_backprop = dropout(xp.transpose(top_vectors), is_train)
     pairwise_coref_scores = xp.matmul(source_span_emb, target_span_emb)
     pairwise_fast_scores = pairwise_score_sum + pairwise_coref_scores
-    # this gives a runtime warning but it's not a problem; silence it
+    # TODO this gives a runtime warning but it's not a problem; silence it
     pairwise_fast_scores += xp.log(mask)
     # these scores can be used for final output
 
-    #TODO figure out topk
     top_ant_idx = xp.argsort(xp.argpartition(pairwise_fast_scores, ant_limit))
     top_ant_scores = pairwise_fast_scores[top_ant_idx]
     top_ant_mask = batch_select(xp, mask, top_ant_idx)
@@ -241,8 +238,90 @@ def select_non_crossing_spans(idxs, starts, ends, limit):
         selected.append(selected[0]) # this seems a bit weird?
     return selected
 
+def logsumexp(xp, arg):
+    return xp.log(xp.sum( xp.exp(arg), axis=1))
 
-if __name__ == "__main__":
+def get_gold_matrix(xp, top_mentions: Pairs, top_antecedents: Pairs, gold_clusters: List[List[Span]]):
+    # this creates an equivalent to the top_antecedent_gold_labels
+
+    gold_starts = []
+    gold_ends = []
+    gold_ids = []
+    # XXX technically the original data has ids, but we only care about equality
+    # first just get the data in lists
+    for ii, cluster in enumerate(gold_clusters, start=1):
+        for span in cluster:
+            gold_starts.append(span.start)
+            gold_ends.append(span.end)
+            gold_ids.append(ii)
+
+    # make it arrays
+    gold_starts = xp.asarray(gold_starts)
+    gold_ends = xp.asarray(gold_ends)
+    gold_ids = xp.asarray(gold_ids)
+
+    # the pairs are start:end indices
+    same_start = xp.expand_dims(gold_starts, 1) == xp.expand_dims(top_mentions.one, 0)
+    same_end = xp.expand_dims(gold_ends, 1) == xp.expand_dims(top_mentions.two, 0)
+    same_span = (same_start & same_end).astype(float)
+    gids = xp.expand_dims(gold_ids, 0).astype(float)
+    labels = xp.matmul( gids, same_span ).astype(int)
+    # this is equivalent to candidate_labels in coref-hoi
+    # 1d array of integers where:
+    # idx: index in mention list
+    # value: cluster id (start at 1, 0 means no cluster)
+    labels = xp.squeeze(labels, 0)
+    return labels
+
+def gold_data_test(xp):
+    mentions = Pairs([1, 2, 3], [2, 4, 7])
+    Span = namedtuple("DummySpan", ('start', 'end'))
+    gold_clusters = [
+            ( Span(1, 2), Span(2, 4) ),
+            ( Span(5, 7), Span(8, 9) ),
+            ]
+
+    res = get_gold_matrix(xp, mentions, None, gold_clusters)
+    ic(res)
+
+
+def loss_demo(xp):
+    preds = xp.asarray([
+        [1.0, 0, 0],
+        [0, 100.0, 1.0],
+        [0, 1.0, 0],
+        [1.0, 0, 0],
+        ])
+
+    # given:
+    #   top mentions
+    #   top antecedents
+    #   gold mention list
+    # generate:
+    #   binary truth matrix
+    # the original coref-hoi uses numpy magic for this
+
+
+
+
+
+    truth = xp.asarray([
+        [True, False, False],
+        [False, True, True],
+        [False, True, False],
+        [True, False, False],
+        ])
+   
+    ic(preds)
+    ic(truth)
+    logmarg = logsumexp(xp, ( preds + xp.log(truth.astype(float))))
+    ic(logmarg)
+    lognorm = logsumexp(xp, preds )
+    loss = xp.sum(lognorm - logmarg)
+    return loss
+
+
+def test_run():
     nlp = spacy.load("en_core_web_sm")
     text = "John called from London, he says it's raining in the city. He's all wet."
     doc = nlp(text)
@@ -252,18 +331,28 @@ if __name__ == "__main__":
     from thinc.util import get_array_module
     xp = get_array_module(doc.tensor)
     span2vec = chain(list2ragged(), reduce_mean())
-    model1 = build_span_embedder(get_candidate_mentions, tok2vec, span2vec)
+    spanembed = build_span_embedder(get_candidate_mentions, tok2vec, span2vec)
     hidden = 1000 # from coref-hoi config
     # XXX I shouldn't have to supply the dimensions here, right?
     #mention_scorer = lambda x, y: (xp.average(x, 1), [])
     mention_scorer = chain(Linear(nI=dim, nO=hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
     mention_scorer.initialize()
-    model2 = build_antecedent_selector(20, 0.4, 10, mention_scorer, dim * 3, 0.3)
+    #TODO use config
+    antsel = build_antecedent_selector(
+            mention_limit=20, 
+            antecedent_limit=10, 
+            mention_scorer=mention_scorer, 
+            dim=(dim * 3), 
+            dropout=0.3)
 
-    coref = chain(model1, model2)
+    coref = chain(spanembed, antsel)
 
     out, backprop = coref(doc, False)
     print(out)
     #print(get_candidate_mentions(doc))
 
 
+if __name__ == "__main__":
+    from thinc.api import get_current_ops
+    ops = get_current_ops()
+    gold_data_test(ops.xp)
