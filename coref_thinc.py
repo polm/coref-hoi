@@ -164,15 +164,16 @@ def antecedent_forward(model, inputs: Mentions, is_train):
     pairwise_fast_scores += xp.log(mask)
     # these scores can be used for final output
 
+    # This used topk in coref-hoi
     top_ant_idx = xp.argsort(xp.argpartition(pairwise_fast_scores, ant_limit))
     top_ant_scores = pairwise_fast_scores[top_ant_idx]
     top_ant_mask = batch_select(xp, mask, top_ant_idx)
     top_ant_offset = batch_select(xp, offsets, top_ant_idx)
 
-
     return top_ant_idx, lambda x: []
 
 def batch_select(xp, tensor, idx):
+    # this is basically used to apply 2d indices to Floats2d
     # original comment:
     # do selection per row (first axis)
     n0, n1 = tensor.shape[0], tensor.shape[1]
@@ -272,6 +273,23 @@ def get_gold_matrix(xp, top_mentions: Pairs, top_antecedents: Pairs, gold_cluste
     # value: cluster id (start at 1, 0 means no cluster)
     labels = xp.squeeze(labels, 0)
     return labels
+
+def get_antecedent_gold(xp, mention_gold, selected_mentions, top_antes, ante_mask):
+    # mention_gold: 1d, idx = mention id, val = cluster id (0 for none)
+    # selected_mentions: non-pruned idxs after crossing eliminated
+    # top_ants: idx of top antecedents from topk
+    top_ment_clusters = mention_gold[selected_mentions]
+
+    top_ante_clusters = top_ment_clusters[top_antes]
+    # this is magic designed to mask invalid ids
+    top_ante_clusters += (ante_mask.to(int) - 1) * 100000
+    same_gold = (top_ante_clusters == xp.expand_dims(top_ment_clusters, 1))
+    non_dummy = xp.expand_dims(top_ment_clusters > 0, 1)
+    pairwise_labels = same_gold & non_dummy
+
+    dummy_ante = xp.logical_not(pairwise_labels.any(axis=1, keepdims=True))
+    ante_gold = xp.concatenate([dummy_ante, pairwise_labels], axis=1)
+    return ante_gold
 
 def gold_data_test(xp):
     mentions = Pairs([1, 2, 3], [2, 4, 7])
