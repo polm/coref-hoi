@@ -65,6 +65,10 @@ def build_span_embedder(mention_generator, tok2vec, span2vec) -> Model[Doc, Ment
                 "span2vec": span2vec,
                 })
 
+#QQQ1: What is the right way to handle this? Should I use HashEmbed as a
+# reference? What is the right way to handle things like tok2vec?
+
+
 def span_embeddings_forward(model, inputs: Doc, is_train):
     mgen = model.attrs["mention_generator"]
     tok2vec = model.get_ref("tok2vec")
@@ -119,6 +123,10 @@ def build_antecedent_selector(
 
 def antecedent_forward(model, inputs: Mentions, is_train):
     xp = model.ops.xp
+
+    #QQQ3: Should this be its own layer, or part of the previous one, or
+    #something else? The mention indices are needed later too. 
+
     mention_scorer = model.get_ref("mention_scorer")
     mention_scores, _ = mention_scorer(inputs.vecs, is_train)
 
@@ -133,6 +141,7 @@ def antecedent_forward(model, inputs: Mentions, is_train):
     # thinc.
 
     # Get only valid spans; (spans [like) this] are not allowed
+    #QQQ2: I guess backprop for this is just a mapping/filter?
     selected = select_non_crossing_spans(top_mentions, 
             inputs.idxs.one,
             inputs.idxs.two,
@@ -155,12 +164,14 @@ def antecedent_forward(model, inputs: Mentions, is_train):
     pairwise_score_sum = xp.expand_dims(top_scores, 1) + xp.expand_dims(top_scores, 0)
     dropout = model.get_ref("dropout")
     coarse_bilinear = model.get_ref("coarse_bilinear")
-    #XXX make this a chain
+
+    # QQQ4: How to handle backprop for this?
     source_span_emb, source_backprop = coarse_bilinear(top_vectors, is_train)
     target_span_emb, target_backprop = dropout(xp.transpose(top_vectors), is_train)
     pairwise_coref_scores = xp.matmul(source_span_emb, target_span_emb)
     pairwise_fast_scores = pairwise_score_sum + pairwise_coref_scores
     # TODO this gives a runtime warning but it's not a problem; silence it
+    # QQQ5: How to handle backprop for a mask?
     pairwise_fast_scores += xp.log(mask)
     # these scores can be used for final output
 
