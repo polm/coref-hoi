@@ -180,8 +180,8 @@ def build_coarse_pruner(
 
 def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> SpanEmbeddings:
     # do scoring
-    scores, spanembeds = inputs
-    scores = scores.squeeze()
+    rawscores, spanembeds = inputs
+    scores = rawscores.squeeze()
     ic(scores.shape)
     # do pruning
     mention_limit = model.attrs["mention_limit"]
@@ -233,7 +233,7 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
 
         return (dXscores, dXembeds)
 
-    return out, coarse_prune_backprop
+    return (rawscores, out), coarse_prune_backprop
 
 def batch_select(xp, tensor, idx):
     # this is basically used to apply 2d indices to Floats2d
@@ -430,12 +430,19 @@ def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
 
     return inputs.vectors.data, backprop
 
-def build_ant_scorer() -> Model[SpanEmbeddings, List[Floats2d]]: 
-    return Model("AntScorer", forward=ant_scorer_forward)
+def build_ant_scorer(bilinear, dropout) -> Model[SpanEmbeddings, List[Floats2d]]: 
+    return Model("AntScorer", 
+            forward=ant_scorer_forward,
+            layers=[bilinear, dropout])
 
 def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> List[Floats2d]:
+    ops = model.ops
+    xp = ops.xp
     # this contains the coarse bilinear in coref-hoi
     # coarse bilinear is a single layer linear network
+    #TODO make these proper refs
+    bilinear = model.layers[0]
+    dropout = model.layers[1]
 
     #XXX Note on dimensions: This won't work as a ragged because the floats2ds
     # are not all the same dimentions. Each floats2d is a square in the size of
@@ -443,25 +450,43 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
     # same size if antecedents are padded... Needs checking.
 
     mscores, sembeds = inputs
+    vecs = sembeds.vectors # ragged
 
     offset = 0
     backprops = []
     out = []
-    for ll in sembeds.vectors.lengths:
+    for ll in vecs.lengths:
         # each iteration is one doc
-        vecs = inputs.data[offset:ll]
-        source, source_b = bilinear(vecs)
-        target, target_b = dropout(vecs)
 
-        scores = xp.matmul(source, target.T)
+        # first calculate the pairwise product scores
+        cvecs = vecs.data[offset:ll]
+        ic(type(vecs))
+        ic(vecs)
+        source, source_b = bilinear(cvecs, is_train)
+        target, target_b = dropout(cvecs, is_train)
+        pw_prod = xp.matmul(source, target.T)
+
+        # now calculate the pairwise mention scores
+        ms = mscores[offset:ll].squeeze()
+        pw_sum = xp.expand_dims(ms, 1) + xp.expand_dims(ms, 0)
+
+        # make a mask so antecedents precede referrents
+        ant_range = xp.arange(0, cvecs.shape[0])
+        with xp.errstate(divide="ignore"):
+            mask = xp.log((xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1).astype(float)
+
+        ic(pw_prod.shape)
+        ic(pw_sum.shape)
+        ic(mask.shape)
+        scores = pw_prod + pw_sum + mask
         out.append(scores)
 
         offset += ll
         backprops.append( (offset, source_b, target_b, source, target) )
 
-    def backprop(dYs: List[Floats2d]) -> Ragged:
+    def backprop(dYs: List[Floats2d]) -> Tuple[Floats1d, SpanEmbeddings]:
         # TODO check that this is actually right
-        dX = Ragged(ops.alloc2f(*inputs.data.shape), inputs.lengths)
+        dX = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         offset = 0
         for dy, (source_b, target_b, source, target), ll in zip(dYs, backprops, inputs.lengths):
             dS = source_b(dy * target.T)
@@ -492,6 +517,9 @@ if __name__ == "__main__":
     hidden = 1000
     mention_scorer = chain(Linear(dim, hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
     mention_scorer.initialize()
+
+    bilinear = chain(Linear(nI=dim * 3, nO=dim * 3), Dropout(0.3))
+    bilinear.initialize()
  
     model = chain(
             tuplify(tok2vec, noop()),
@@ -501,12 +529,9 @@ if __name__ == "__main__":
                 noop()
             ),
             build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
-            build_ant_scorer(), # [Floats1d, SpanEmbeds] -> [Floats2d (scores), Ints2d (mentions)]
-            outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
+            build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [Floats2d (scores), Ints2d (mentions)]
+    #        outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
             )
 
     out, backprop = model(docs, False)
     ic(out)
-    ic(out.vectors.data[0])
-    ic(out.indices[0])
-    ic(out.vectors.data[0].shape)
