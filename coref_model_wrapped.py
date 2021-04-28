@@ -98,6 +98,8 @@ def CorefPreprocessor(name: str) -> Model[str, List]:
         # genres aren't relevant to input data though so just use default
         genre = "nw" # default genre
         doc = get_document("nw", conll_lines, 'english', seg_len, bert_tokenizer)
+        print(doc)
+
 
         tensor_examples, _ = data_processor.get_tensor_examples_from_custom_input([doc])
        

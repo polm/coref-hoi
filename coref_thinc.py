@@ -124,15 +124,8 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
     tokvecs = xp.concatenate(tokvecs)
     spans = [tokvecs[ii:jj] for ii, jj in mentions.tolist()]
     idx = 10
-    #ic(spans[idx])
-    #ic(len(spans[idx]))
-    #ic(ops.asarray2f(spans[idx]))
     avgs = [xp.mean(ss, axis=0) for ss in spans]
-    ic(avgs[0])
-    ic(avgs[0].shape)
-    ic(len(spans), len(avgs), mentions.shape)
     spanvecs = ops.asarray2f(avgs)
-    ic(spanvecs.shape)
     
     # first and last token embeds
     starts = [tokvecs[ii] for ii in mentions[:,0]]
@@ -182,7 +175,6 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
     # do scoring
     rawscores, spanembeds = inputs
     scores = rawscores.squeeze()
-    ic(scores.shape)
     # do pruning
     mention_limit = model.attrs["mention_limit"]
     #XXX: Issue here. Don't need docs to find crossing spans, but might for the limits.
@@ -243,7 +235,6 @@ def batch_select(xp, tensor, idx):
 
     offset = xp.expand_dims(xp.arange(0, n0) * n1, 1)
     nidx = idx + offset
-    #ic(nidx, idx, offset)
     tt = xp.reshape(tensor, [n0 * n1, -1])
     selected = tt[nidx]
 
@@ -267,8 +258,6 @@ def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
     for idx in idxs:
         if len(selected) >= limit or idx > len(starts):
             break
-
-        ic(len(starts), len(ends), len(idxs), idx)
 
         start, end = starts[idx], ends[idx]
         cross = False
@@ -456,18 +445,17 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
     backprops = []
     out = []
     for ll in vecs.lengths:
+        hi = offset+ll
         # each iteration is one doc
 
         # first calculate the pairwise product scores
-        cvecs = vecs.data[offset:ll]
-        ic(type(vecs))
-        ic(vecs)
+        cvecs = vecs.data[offset:hi]
         source, source_b = bilinear(cvecs, is_train)
         target, target_b = dropout(cvecs, is_train)
         pw_prod = xp.matmul(source, target.T)
 
         # now calculate the pairwise mention scores
-        ms = mscores[offset:ll].squeeze()
+        ms = mscores[offset:hi].squeeze()
         pw_sum = xp.expand_dims(ms, 1) + xp.expand_dims(ms, 0)
 
         # make a mask so antecedents precede referrents
@@ -475,9 +463,6 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         with xp.errstate(divide="ignore"):
             mask = xp.log((xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1).astype(float)
 
-        ic(pw_prod.shape)
-        ic(pw_sum.shape)
-        ic(mask.shape)
         scores = pw_prod + pw_sum + mask
         out.append(scores)
 
