@@ -235,69 +235,6 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
 
     return out, coarse_prune_backprop
 
-#XXX would it make sense to have the other model just be inside this one?
-def build_antecedent_selector(
-        mention_scorer: Model[Floats2d, Floats1d],
-        dim: int,
-        antecedent_limit: int, 
-        mention_limit: int,  # maybe this and the next one should be a union?
-        mention_ratio: float = 1.0, 
-        dropout: float = 0.3,
-        ) -> Model[Mentions, Pairs]:
-    # TODO take size as a param or something
-    linear = Linear(dim, dim)
-    linear.initialize()
-    dropout = Dropout(dropout)
-    cb = chain(linear, dropout)
-    return Model("AntecedentSelector", 
-            forward=antecedent_forward,
-            attrs={
-                "mention_limit": mention_limit,
-                "mention_ratio": mention_ratio,
-                "antecedent_limit": antecedent_limit,
-                },
-            refs={
-                "mention_scorer": mention_scorer,
-                "dropout": dropout,
-                "coarse_bilinear": cb,
-                }
-            )
-
-def antecedent_forward(model, inputs: SpanEmbeddings, is_train) -> Tuple[Ints2d, List[Floats2d]]:
-    xp = model.ops.xp
-
-    # max_top_antecedents in old code
-    # TODO make this work with SpanEmbeddings
-    ant_limit = min(
-            inputs.vecs.shape[0] * model.attrs["mention_ratio"],
-            model.attrs["antecedent_limit"],
-            # can't have a higher ant limit than spans we check
-            top_span_limit)
-
-    # create a mask so that antecedents must come before referrents
-    top_span_range = xp.arange(top_span_limit) 
-    offsets = xp.expand_dims(top_span_range, 1) - xp.expand_dims(top_span_range, 0)
-    mask = xp.float64(offsets >= 1) 
-
-    pairwise_score_sum = xp.expand_dims(top_scores, 1) + xp.expand_dims(top_scores, 0)
-    dropout = model.get_ref("dropout")
-    coarse_bilinear = model.get_ref("coarse_bilinear")
-
-    # QQQ4: How to handle backprop for this?
-    source_span_emb, source_backprop = coarse_bilinear(top_vectors, is_train)
-    target_span_emb, target_backprop = dropout(xp.transpose(top_vectors), is_train)
-    pairwise_coref_scores = xp.matmul(source_span_emb, target_span_emb)
-    pairwise_fast_scores = pairwise_score_sum + pairwise_coref_scores
-    # TODO this gives a runtime warning but it's not a problem; silence it
-    # QQQ5: How to handle backprop for a mask?
-    pairwise_fast_scores += xp.log(mask)
-    # these scores can be used for final output
-
-    def antecedent_backprop(dY: Tuple[Ints2d, List[Floats2d]]) -> SpanEmbeddings:
-        pass
-
-    return pairwise_fast_scores, lambda x: []
-
 def batch_select(xp, tensor, idx):
     # this is basically used to apply 2d indices to Floats2d
     # original comment:
