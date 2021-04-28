@@ -194,23 +194,25 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
     selected = []
     sellens = []
     for menlen in spanembeds.vectors.lengths:
-        cscores = scores[offset:menlen]
-        ic(scores.shape)
-        ic(cscores.shape)
+        hi = offset + menlen
+        cscores = scores[offset:hi]
 
         # negate it so highest numbers come first
-        # add the offset back so the indexes are in the full list
-        tops = (model.ops.xp.argsort(-1 * cscores) + offset).tolist()
-        starts = spanembeds.indices[:, 0].tolist()
-        ends = spanembeds.indices[:, 1].tolist()
+        tops = (model.ops.xp.argsort(-1 * cscores)).tolist()
+        # TODO this is wrong
+        starts = spanembeds.indices[offset:hi, 0].tolist()
+        ends = spanembeds.indices[offset:hi:, 1].tolist()
 
         # selected is a 1d integer list
         csel = select_non_crossing_spans(
                 tops, starts, ends, mention_limit)
+        # add the offset so these indices are absolute
+        csel = [ii + offset for ii in csel]
         # this should be constant because short choices are padded
         sellens.append(len(csel))
         selected += csel
-   
+        offset += menlen
+  
     selected = model.ops.asarray1i(selected)
     top_spans = spanembeds.indices[selected]
     top_vecs = spanembeds.vectors.data[selected]
