@@ -8,6 +8,7 @@ from spacy.tokens import Doc, Span
 from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
+from coref_model_wrapped import get_predicted_clusters
 
 from icecream import ic
 
