@@ -1,15 +1,56 @@
 from dataclasses import dataclass
 
 from thinc.api import Model, Linear, Relu, Dropout, chain, concatenate
-from thinc.api import list2ragged, reduce_mean, ragged2list
-from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat
+from thinc.api import list2ragged, reduce_mean, ragged2list, noop
+from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat, Ints2d, Ragged
 import spacy
 from spacy.tokens import Doc, Span
-from typing import cast, List
+from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
 
 from icecream import ic
+
+def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
+    layers = (layer1, layer2) + layers
+    names = [layer.name for layer in layers]
+    return Model(
+            "tuple(" + ", ".join(names) + ")", 
+            tuplify_forward, 
+            layers=layers,
+    )
+
+
+def tuplify_forward(model, X, is_train):
+    Ys = []
+    backprops = []
+    for layer in model.layers:
+        Y, backprop = layer(X, is_train)
+        Ys.append(Y)
+        backprops.append(backprop)
+
+    def backprop_tuplify(dYs):
+        dXs = [bp(dY) for bp, dY in zip(backprops, dYs)]
+        dX = dXs[0]
+        for dx in dXs[1:]:
+            dX += dx
+        return dX
+
+    return tuple(Ys), backprop_tuplify
+
+@dataclass
+class SpanEmbeddings:
+    indices: Ints2d # Array with 2 columns (for start and end index)
+    vectors: Ragged # Ragged[Floats2d] # One vector per span
+    # NB: We assume that the indices refer to a concatenated Floats2d that
+    # has one row per token in the *batch* of documents. This makes it unambiguous
+    # which row is in which document, because if the lengths are e.g. [10, 5],
+    # a span starting at 11 must be starting at token 2 of doc 1. A bug could
+    # potentially cause you to have a span which crosses a doc boundary though,
+    # which would be bad.
+    # The lengths in the Ragged are not the tokens per doc, but the number of 
+    # mentions per doc.
+
 
 @dataclass
 class Mentions:
@@ -53,45 +94,144 @@ def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
     return Pairs(begins, ends)
 
 # model converting a Doc/Mention to span embeddings
-def build_span_embedder(mention_generator, tok2vec, span2vec) -> Model[Doc, Mentions]:
+# mention_generator: Callable[Doc, Pairs[int]]
+def build_span_embedder(mention_generator) -> Model[Tuple[List[Floats2d], List[Doc]], SpanEmbeddings]:
     
     return Model("SpanEmbedding", 
             forward=span_embeddings_forward, 
-            attrs={
-                "mention_generator": mention_generator,
-                },
-            refs={
-                "tok2vec": tok2vec,
-                "span2vec": span2vec,
-                })
+            attrs={ "mention_generator": mention_generator, },
+    )
 
-#QQQ1: What is the right way to handle this? Should I use HashEmbed as a
-# reference? What is the right way to handle things like tok2vec?
+def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_train) -> SpanEmbeddings:
+    ops = model.ops
+    xp = ops.xp
 
+    tokvecs, docs = inputs
 
-def span_embeddings_forward(model, inputs: Doc, is_train):
     mgen = model.attrs["mention_generator"]
-    tok2vec = model.get_ref("tok2vec")
-    span2vec = model.get_ref("span2vec")
-    xp = model.ops.xp
+    mentions = ops.alloc2i(0, 2)
+    total_length = 0
+    docmenlens = [] # number of mentions per doc
+    for doc in docs:
+        mm = mgen(doc)
+        docmenlens.append(len(mm))
+        cments = ops.asarray2i([mm.one, mm.two]).transpose()
 
-    mentions = mgen(inputs)
-    tokvecs, _ = tok2vec([inputs], False)
-    tokvecs = tokvecs[0]
+        mentions = xp.concatenate( (mentions, cments + total_length) )
+        total_length += len(doc)
 
-    spans = [tokvecs[ii:jj] for ii, jj in zip(mentions.one, mentions.two)]
-    spans, _ = span2vec(spans, False)
+    # TODO support attention here
+    tokvecs = xp.concatenate(tokvecs)
+    spans = [tokvecs[ii:jj] for ii, jj in mentions.tolist()]
+    idx = 10
+    #ic(spans[idx])
+    #ic(len(spans[idx]))
+    #ic(ops.asarray2f(spans[idx]))
+    avgs = [xp.mean(ss, axis=0) for ss in spans]
+    ic(avgs[0])
+    ic(avgs[0].shape)
+    ic(len(spans), len(avgs), mentions.shape)
+    spanvecs = ops.asarray2f(avgs)
+    ic(spanvecs.shape)
     
     # first and last token embeds
-    starts = [tokvecs[ii] for ii in mentions.one]
-    ends   = [tokvecs[jj] for jj in mentions.two]
+    starts = [tokvecs[ii] for ii in mentions[:,0]]
+    ends   = [tokvecs[jj] for jj in mentions[:,1]]
 
-    starts = xp.asarray(starts)
-    ends   = xp.asarray(ends)
-    out = xp.concatenate( (starts, ends, spans), 1 )
-    # TODO backprop
-    return Mentions(out, mentions), lambda x: []
 
+    starts = ops.asarray2f(starts)
+    ends   = ops.asarray2f(ends)
+    concat = xp.concatenate( (starts, ends, spanvecs), 1 )
+    embeds = Ragged(concat, docmenlens)
+
+    def backprop_span_embed(dY: SpanEmbeddings) -> Tuple[List[Floats2d], List[Doc]]:
+        # how does this work?
+        tokvecs[0].shape[0] # TODO get this properly
+        dX = [ops.alloc2f(len(doc), dim) for doc in docs]
+
+        docidx = 0
+        offset = len(docs[docidx])
+        for mi in range(0, len(dY.indices)):
+            start, end = dY.indices[mi, :]
+            if end > offset + len(docs[docidx]):
+                docidx += 1
+                offset += len(docs[docidx])
+
+            # get the tokvec
+            embed = dY.vectors.data[mi, :]
+            #XXX probably better to divide by number of tokens
+            dX[start:end] += embed
+        return dX
+
+    return SpanEmbeddings(mentions, embeds), backprop_span_embed
+
+
+# SpanEmbeddings -> SpanEmbeddings
+def build_coarse_pruner(
+        mention_limit: int,
+        ) -> Model[SpanEmbeddings, SpanEmbeddings]:
+    model = Model("CoarsePruner",
+            forward=coarse_prune,
+            attrs={
+                "mention_limit": mention_limit,
+                },
+            )
+    return model
+
+def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> SpanEmbeddings:
+    # do scoring
+    scores, spanembeds = inputs
+    scores = scores.squeeze()
+    ic(scores.shape)
+    # do pruning
+    mention_limit = model.attrs["mention_limit"]
+    #XXX: Issue here. Don't need docs to find crossing spans, but might for the limits.
+    # In old code the limit can be:
+    # - hard number per doc
+    # - ratio of tokens in the doc
+
+    offset = 0
+    selected = []
+    sellens = []
+    for menlen in spanembeds.vectors.lengths:
+        cscores = scores[offset:menlen]
+        ic(scores.shape)
+        ic(cscores.shape)
+
+        # negate it so highest numbers come first
+        # add the offset back so the indexes are in the full list
+        tops = (model.ops.xp.argsort(-1 * cscores) + offset).tolist()
+        starts = spanembeds.indices[:, 0].tolist()
+        ends = spanembeds.indices[:, 1].tolist()
+
+        # selected is a 1d integer list
+        csel = select_non_crossing_spans(
+                tops, starts, ends, mention_limit)
+        # this should be constant because short choices are padded
+        sellens.append(len(csel))
+        selected += csel
+   
+    selected = model.ops.asarray1i(selected)
+    top_spans = spanembeds.indices[selected]
+    top_vecs = spanembeds.vectors.data[selected]
+
+    out = SpanEmbeddings(top_spans, Ragged(top_vecs, sellens))
+
+    def coarse_prune_backprop(dY: Tuple[Floats1d, SpanEmbeddings]) -> Tuple[Floats1d, SpanEmbeddings]:
+        ll = spanembeds.indices.shape[0]
+
+        dYscores, dYembeds = dY
+
+        dXscores = model.ops.alloc1f(ll) 
+        dXscores[selected] = dYscores
+
+        dXvecs = model.ops.alloc2f(inputs.vectors.shape)
+        dXvecs[selected] = dYembeds
+        dXembeds = SpanEmbeddings(inputs.indices, dXvecs)
+
+        return (dXscores, dXembeds)
+
+    return out, coarse_prune_backprop
 
 #XXX would it make sense to have the other model just be inside this one?
 def build_antecedent_selector(
@@ -121,35 +261,11 @@ def build_antecedent_selector(
                 }
             )
 
-def antecedent_forward(model, inputs: Mentions, is_train):
+def antecedent_forward(model, inputs: SpanEmbeddings, is_train) -> Tuple[Ints2d, List[Floats2d]]:
     xp = model.ops.xp
 
-    #QQQ3: Should this be its own layer, or part of the previous one, or
-    #something else? The mention indices are needed later too. 
-
-    mention_scorer = model.get_ref("mention_scorer")
-    mention_scores, _ = mention_scorer(inputs.vecs, is_train)
-
-    # pick top spans
-    top_mentions = xp.argsort(-1 * mention_scores).flatten()
-
-    # num_top_spans in old code
-    top_span_limit = model.attrs["mention_limit"]
-
-    #XXX this is kind of a weird step. They drop from GPU to CPU in the
-    # coref-hoi code, and I'm not sure how this would look correctly in
-    # thinc.
-
-    # Get only valid spans; (spans [like) this] are not allowed
-    #QQQ2: I guess backprop for this is just a mapping/filter?
-    selected = select_non_crossing_spans(top_mentions, 
-            inputs.idxs.one,
-            inputs.idxs.two,
-            top_span_limit)
-    top_scores = mention_scores[selected]
-    top_vectors = inputs.vecs[selected]
-
     # max_top_antecedents in old code
+    # TODO make this work with SpanEmbeddings
     ant_limit = min(
             inputs.vecs.shape[0] * model.attrs["mention_ratio"],
             model.attrs["antecedent_limit"],
@@ -175,13 +291,10 @@ def antecedent_forward(model, inputs: Mentions, is_train):
     pairwise_fast_scores += xp.log(mask)
     # these scores can be used for final output
 
-    # This used topk in coref-hoi
-    top_ant_idx = xp.argsort(xp.argpartition(pairwise_fast_scores, ant_limit))
-    top_ant_scores = pairwise_fast_scores[top_ant_idx]
-    top_ant_mask = batch_select(xp, mask, top_ant_idx)
-    top_ant_offset = batch_select(xp, offsets, top_ant_idx)
+    def antecedent_backprop(dY: Tuple[Ints2d, List[Floats2d]]) -> SpanEmbeddings:
+        pass
 
-    return top_ant_idx, lambda x: []
+    return pairwise_fast_scores, lambda x: []
 
 def batch_select(xp, tensor, idx):
     # this is basically used to apply 2d indices to Floats2d
@@ -201,9 +314,9 @@ def batch_select(xp, tensor, idx):
     return selected
 
 
-def select_non_crossing_spans(idxs, starts, ends, limit):
-    """Given a list of spans sorted in descending order, select the top spans,
-    discarding spans that cross.
+def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
+    """Given a list of spans sorted in descending order, return the indexes of
+    spans to keep, discarding spans that cross.
 
     Nested spans are allowed.
     """
@@ -212,7 +325,6 @@ def select_non_crossing_spans(idxs, starts, ends, limit):
     start_to_max_end = {}
     end_to_min_start = {}
 
-    ic(idxs)
     for idx in idxs:
         if len(selected) >= limit or idx > len(starts):
             break
@@ -253,37 +365,58 @@ def select_non_crossing_spans(idxs, starts, ends, limit):
 def logsumexp(xp, arg):
     return xp.log(xp.sum( xp.exp(arg), axis=1))
 
-def get_gold_matrix(xp, top_mentions: Pairs, top_antecedents: Pairs, gold_clusters: List[List[Span]]):
+def get_gold_clusters_array(xp, docs: List[Doc]) -> List[Ints2d]:
+    # this assumes the only spans on the doc are coref clusters
+    out = []
+    for doc in docs:
+        starts = []
+        ends = []
+        ids = []
+        # XXX technically the original data has ids, but we only care about equality
+        # first just get the data in lists
+        for ii, cluster in enumerate(doc.spans.values(), start=1):
+            for span in cluster:
+                starts.append(span.start)
+                ends.append(span.end)
+                ids.append(ii)
+
+        # make it arrays
+        starts = xp.asarray(starts)
+        ends = xp.asarray(ends)
+        ids = xp.asarray(ids)
+
+        out.append( xp.column_stack( (starts, ends, ids) ) )
+    return out
+
+def get_gold_mention_labels(xp, mentions: List[Ints2d], gold_clusters: List[Ints2d]):
+    """Given mentions and gold clusters, find the gold cluster ID for each mention.
+    If the mention is not a gold mention the label will be 0.
+
+    The inputs are each a list with one entry per doc."""
     # this creates an equivalent to the top_antecedent_gold_labels
 
-    gold_starts = []
-    gold_ends = []
-    gold_ids = []
-    # XXX technically the original data has ids, but we only care about equality
-    # first just get the data in lists
-    for ii, cluster in enumerate(gold_clusters, start=1):
-        for span in cluster:
-            gold_starts.append(span.start)
-            gold_ends.append(span.end)
-            gold_ids.append(ii)
+    out = []
 
-    # make it arrays
-    gold_starts = xp.asarray(gold_starts)
-    gold_ends = xp.asarray(gold_ends)
-    gold_ids = xp.asarray(gold_ids)
+    for ments, gold in zip(mentions, gold_clusters):
+        gold_starts = gold[:, 0]
+        gold_ends = gold[:, 1]
+        gold_ids = gold[:, 2]
+        ment_starts = ments[:, 0]
+        ment_ends = ments[:, 1]
 
-    # the pairs are start:end indices
-    same_start = xp.expand_dims(gold_starts, 1) == xp.expand_dims(top_mentions.one, 0)
-    same_end = xp.expand_dims(gold_ends, 1) == xp.expand_dims(top_mentions.two, 0)
-    same_span = (same_start & same_end).astype(float)
-    gids = xp.expand_dims(gold_ids, 0).astype(float)
-    labels = xp.matmul( gids, same_span ).astype(int)
-    # this is equivalent to candidate_labels in coref-hoi
-    # 1d array of integers where:
-    # idx: index in mention list
-    # value: cluster id (start at 1, 0 means no cluster)
-    labels = xp.squeeze(labels, 0)
-    return labels
+
+        same_start = xp.expand_dims(gold_starts, 1) == xp.expand_dims(ment_starts, 0)
+        same_end = xp.expand_dims(gold_ends, 1) == xp.expand_dims(ment_ends, 0)
+        same_span = (same_start & same_end).astype(float)
+        gids = xp.expand_dims(gold_ids, 0).astype(float)
+        labels = xp.matmul( gids, same_span ).astype(int)
+        # this is equivalent to candidate_labels in coref-hoi
+        # 1d array of integers where:
+        # idx: index in mention list
+        # value: cluster id (start at 1, 0 means no cluster/wrong)
+        labels = xp.squeeze(labels, 0)
+        out.append(labels)
+    return out
 
 def get_antecedent_gold(xp, mention_gold, selected_mentions, top_antes, ante_mask):
     # mention_gold: 1d, idx = mention id, val = cluster id (0 for none)
@@ -329,11 +462,6 @@ def loss_demo(xp):
     # generate:
     #   binary truth matrix
     # the original coref-hoi uses numpy magic for this
-
-
-
-
-
     truth = xp.asarray([
         [True, False, False],
         [False, True, True],
@@ -360,7 +488,10 @@ def test_run():
     from thinc.util import get_array_module
     xp = get_array_module(doc.tensor)
     span2vec = chain(list2ragged(), reduce_mean())
-    spanembed = build_span_embedder(get_candidate_mentions, tok2vec, span2vec)
+
+    mention_limit = 20 # max length of a mention in tokens
+    mention_generator = lambda doc: get_candidate_mentions(doc, mention_limit)
+    spanembed = build_span_embedder(mention_generator, tok2vec, span2vec)
     hidden = 1000 # from coref-hoi config
     # XXX I shouldn't have to supply the dimensions here, right?
     #mention_scorer = lambda x, y: (xp.average(x, 1), [])
@@ -380,8 +511,94 @@ def test_run():
     print(out)
     #print(get_candidate_mentions(doc))
 
+def build_take_vecs() -> Model[SpanEmbeddings, Ragged]:
+    # this just gets vectors out of spanembeddings
+    return Model("TakeVecs", forward=take_vecs_forward)
+
+def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
+    def backprop(dY: Ragged) -> SpanEmbeddings:
+        vecs = Ragged(dY, inputs.vectors.lengths)
+        return SpanEmbeddings(inputs.indices, vecs)
+
+    return inputs.vectors.data, backprop
+
+def build_ant_scorer() -> Model[SpanEmbeddings, List[Floats2d]]: 
+    return Model("AntScorer", forward=ant_scorer_forward)
+
+def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> List[Floats2d]:
+    # this contains the coarse bilinear in coref-hoi
+    # coarse bilinear is a single layer linear network
+
+    #XXX Note on dimensions: This won't work as a ragged because the floats2ds
+    # are not all the same dimentions. Each floats2d is a square in the size of
+    # the number of antecedents in the document. Actually, that will have the
+    # same size if antecedents are padded... Needs checking.
+
+    mscores, sembeds = inputs
+
+    offset = 0
+    backprops = []
+    out = []
+    for ll in sembeds.vectors.lengths:
+        # each iteration is one doc
+        vecs = inputs.data[offset:ll]
+        source, source_b = bilinear(vecs)
+        target, target_b = dropout(vecs)
+
+        scores = xp.matmul(source, target.T)
+        out.append(scores)
+
+        offset += ll
+        backprops.append( (offset, source_b, target_b, source, target) )
+
+    def backprop(dYs: List[Floats2d]) -> Ragged:
+        # TODO check that this is actually right
+        dX = Ragged(ops.alloc2f(*inputs.data.shape), inputs.lengths)
+        offset = 0
+        for dy, (source_b, target_b, source, target), ll in zip(dYs, backprops, inputs.lengths):
+            dS = source_b(dy * target.T)
+            dT = target_b(dy * source.T)
+            dX[offset:ll] = dS + dT
+        return dX
+
+    return out, backprop
+
+
 
 if __name__ == "__main__":
-    from thinc.api import get_current_ops
-    ops = get_current_ops()
-    gold_data_test(ops.xp)
+    #from thinc.api import get_current_ops
+    #ops = get_current_ops()
+    #gold_data_test(ops.xp)
+
+    nlp = spacy.load("en_core_web_sm")
+    texts = [
+            "John called from London, he says it's raining in the city. He's all wet.",
+            "Tarou went to Tokyo Tower. It was sunny there.",
+            ]
+    docs = [nlp(text) for text in texts]
+    tok2vec = nlp.pipeline[0][1].model
+    dim = 96 # TODO get this from the model or something
+
+    span_embedder = build_span_embedder(get_candidate_mentions)
+
+    hidden = 1000
+    mention_scorer = chain(Linear(dim, hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
+    mention_scorer.initialize()
+ 
+    model = chain(
+            tuplify(tok2vec, noop()),
+            span_embedder,
+            tuplify(
+                chain(build_take_vecs(), mention_scorer), 
+                noop()
+            ),
+            build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
+            build_ant_scorer(), # [Floats1d, SpanEmbeds] -> [Floats2d (scores), Ints2d (mentions)]
+            outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
+            )
+
+    out, backprop = model(docs, False)
+    ic(out)
+    ic(out.vectors.data[0])
+    ic(out.indices[0])
+    ic(out.vectors.data[0].shape)
