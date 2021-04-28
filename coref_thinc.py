@@ -509,17 +509,8 @@ def scores2clusters(xp, scores: List[Floats2d], idxs: Ints2d) -> List[List[List[
         out.append(predicted)
     return out
 
-if __name__ == "__main__":
-    #from thinc.api import get_current_ops
-    #ops = get_current_ops()
-    #gold_data_test(ops.xp)
-
+def prep_model():
     nlp = spacy.load("en_core_web_sm")
-    texts = [
-            "John called from London, he says it's raining in the city. He's all wet.",
-            "Tarou went to Tokyo Tower. It was sunny there.",
-            ]
-    docs = [nlp(text) for text in texts]
     tok2vec = nlp.pipeline[0][1].model
     dim = 96 * 3 # TODO get this from the model or something
 
@@ -543,7 +534,23 @@ if __name__ == "__main__":
             build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [List[Floats2d] (scores), Ints2d (mentions)]
     #        outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
             )
+    return model
+
+if __name__ == "__main__":
+    #from thinc.api import get_current_ops
+    #ops = get_current_ops()
+    #gold_data_test(ops.xp)
+
+    texts = [
+            "John called from London, he says it's raining in the city. He's all wet.",
+            "Tarou went to Tokyo Tower. It was sunny there.",
+            ]
+    docs = [nlp(text) for text in texts]
+
+    model = prep_model()
 
     out, backprop = model(docs, False)
     ic(out)
     ic(scores2clusters(model.ops.xp, *out))
+
+
