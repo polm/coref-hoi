@@ -173,6 +173,8 @@ def build_coarse_pruner(
     return model
 
 def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> SpanEmbeddings:
+    # input spanembeddings are *all* candidate mentions
+    # output spanembeddings are *pruned* mentions
     # do scoring
     rawscores, spanembeds = inputs
     scores = rawscores.squeeze()
@@ -291,9 +293,6 @@ def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
         selected.append(selected[0]) # this seems a bit weird?
     return selected
 
-def logsumexp(xp, arg):
-    return xp.log(xp.sum( xp.exp(arg), axis=1))
-
 def get_gold_clusters_array(xp, docs: List[Doc]) -> List[Ints2d]:
     # this assumes the only spans on the doc are coref clusters
     out = []
@@ -409,12 +408,12 @@ def test_run():
     print(out)
     #print(get_candidate_mentions(doc))
 
-def build_take_vecs() -> Model[SpanEmbeddings, Ragged]:
+def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
     # this just gets vectors out of spanembeddings
     return Model("TakeVecs", forward=take_vecs_forward)
 
 def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
-    def backprop(dY: Ragged) -> SpanEmbeddings:
+    def backprop(dY: Floats2d) -> SpanEmbeddings:
         vecs = Ragged(dY, inputs.vectors.lengths)
         return SpanEmbeddings(inputs.indices, vecs)
 
@@ -425,7 +424,7 @@ def build_ant_scorer(bilinear, dropout) -> Model[SpanEmbeddings, List[Floats2d]]
             forward=ant_scorer_forward,
             layers=[bilinear, dropout])
 
-def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> List[Floats2d]:
+def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Tuple[List[Floats2d], Ints2d]:
     ops = model.ops
     xp = ops.xp
     # this contains the coarse bilinear in coref-hoi
@@ -468,21 +467,47 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         out.append(scores)
 
         offset += ll
-        backprops.append( (offset, source_b, target_b, source, target) )
+        backprops.append( (source_b, target_b, source, target) )
 
-    def backprop(dYs: List[Floats2d]) -> Tuple[Floats1d, SpanEmbeddings]:
+    def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats1d, SpanEmbeddings]:
         # TODO check that this is actually right
-        dX = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
+        dYscores, dYembeds = dYs
+        dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
+        # TODO actually backprop to these scores
+        dXscores = ops.alloc1f(*mscores.shape)
+
         offset = 0
-        for dy, (source_b, target_b, source, target), ll in zip(dYs, backprops, inputs.lengths):
+        for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
             dS = source_b(dy * target.T)
             dT = target_b(dy * source.T)
-            dX[offset:ll] = dS + dT
-        return dX
+            dXembeds[offset:offset+ll] = dS + dT
+            offset += ll
+        return (dXscores, SpanEmbeddings(sembeds.indices, dXembeds))
 
-    return out, backprop
+    return (out, sembeds.indices), backprop
 
+def scores2clusters(xp, scores: List[Floats2d], idxs: Ints2d) -> List[List[List[Tuple[int, int]]]]:
+    # one item in scores for each doc
+    # output: per doc, one list of clusters, which are a list of int spans
 
+    out = []
+    offset = 0
+    for cscores in scores:
+        ll = cscores.shape[0]
+        hi = offset + ll
+
+        starts = idxs[offset:hi, 0].tolist()
+        ends = idxs[offset:hi, 1].tolist()
+        score_idx = xp.argsort(-1 * cscores, 1)
+
+        ic(starts, ends)
+        ic(cscores)
+        ic(score_idx)
+        predicted = get_predicted_clusters(
+                starts, ends, score_idx, cscores)
+        ic(predicted)
+        out.append(predicted)
+    return out
 
 if __name__ == "__main__":
     #from thinc.api import get_current_ops
@@ -496,7 +521,7 @@ if __name__ == "__main__":
             ]
     docs = [nlp(text) for text in texts]
     tok2vec = nlp.pipeline[0][1].model
-    dim = 96 # TODO get this from the model or something
+    dim = 96 * 3 # TODO get this from the model or something
 
     span_embedder = build_span_embedder(get_candidate_mentions)
 
@@ -504,7 +529,7 @@ if __name__ == "__main__":
     mention_scorer = chain(Linear(dim, hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
     mention_scorer.initialize()
 
-    bilinear = chain(Linear(nI=dim * 3, nO=dim * 3), Dropout(0.3))
+    bilinear = chain(Linear(nI=dim, nO=dim), Dropout(0.3))
     bilinear.initialize()
  
     model = chain(
@@ -515,9 +540,10 @@ if __name__ == "__main__":
                 noop()
             ),
             build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
-            build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [Floats2d (scores), Ints2d (mentions)]
+            build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [List[Floats2d] (scores), Ints2d (mentions)]
     #        outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
             )
 
     out, backprop = model(docs, False)
     ic(out)
+    ic(scores2clusters(model.ops.xp, *out))
