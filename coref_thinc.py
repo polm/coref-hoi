@@ -447,37 +447,6 @@ def gold_data_test(xp):
     ic(res)
 
 
-def loss_demo(xp):
-    preds = xp.asarray([
-        [1.0, 0, 0],
-        [0, 100.0, 1.0],
-        [0, 1.0, 0],
-        [1.0, 0, 0],
-        ])
-
-    # given:
-    #   top mentions
-    #   top antecedents
-    #   gold mention list
-    # generate:
-    #   binary truth matrix
-    # the original coref-hoi uses numpy magic for this
-    truth = xp.asarray([
-        [True, False, False],
-        [False, True, True],
-        [False, True, False],
-        [True, False, False],
-        ])
-   
-    ic(preds)
-    ic(truth)
-    logmarg = logsumexp(xp, ( preds + xp.log(truth.astype(float))))
-    ic(logmarg)
-    lognorm = logsumexp(xp, preds )
-    loss = xp.sum(lognorm - logmarg)
-    return loss
-
-
 def test_run():
     nlp = spacy.load("en_core_web_sm")
     text = "John called from London, he says it's raining in the city. He's all wet."
