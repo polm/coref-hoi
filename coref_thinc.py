@@ -376,39 +376,6 @@ def gold_data_test(xp):
     ic(res)
 
 
-def test_run():
-    nlp = spacy.load("en_core_web_sm")
-    text = "John called from London, he says it's raining in the city. He's all wet."
-    doc = nlp(text)
-    tok2vec = nlp.pipeline[0][1].model
-    dim = 96 # TODO get this from the model or something
-    
-    from thinc.util import get_array_module
-    xp = get_array_module(doc.tensor)
-    span2vec = chain(list2ragged(), reduce_mean())
-
-    mention_limit = 20 # max length of a mention in tokens
-    mention_generator = lambda doc: get_candidate_mentions(doc, mention_limit)
-    spanembed = build_span_embedder(mention_generator, tok2vec, span2vec)
-    hidden = 1000 # from coref-hoi config
-    # XXX I shouldn't have to supply the dimensions here, right?
-    #mention_scorer = lambda x, y: (xp.average(x, 1), [])
-    mention_scorer = chain(Linear(nI=dim, nO=hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
-    mention_scorer.initialize()
-    #TODO use config
-    antsel = build_antecedent_selector(
-            mention_limit=20, 
-            antecedent_limit=10, 
-            mention_scorer=mention_scorer, 
-            dim=(dim * 3), 
-            dropout=0.3)
-
-    coref = chain(spanembed, antsel)
-
-    out, backprop = coref(doc, False)
-    print(out)
-    #print(get_candidate_mentions(doc))
-
 def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
     # this just gets vectors out of spanembeddings
     return Model("TakeVecs", forward=take_vecs_forward)
