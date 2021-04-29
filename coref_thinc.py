@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from thinc.api import Model, Linear, Relu, Dropout, chain, concatenate
 from thinc.api import list2ragged, reduce_mean, ragged2list, noop
-from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat, Ints2d, Ragged
+from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat, Ints2d, Ragged, Ints1d
 import spacy
 from spacy.tokens import Doc, Span
 from typing import cast, List, Callable, Any, Tuple
@@ -346,7 +346,7 @@ def get_gold_mention_labels(xp, mentions: List[Ints2d], gold_clusters: List[Ints
         out.append(labels)
     return out
 
-def get_antecedent_gold(xp, mention_gold, selected_mentions, top_antes, ante_mask):
+def get_antecedent_gold(xp, mention_gold: Ints1d, selected_mentions: Ints2d, top_antes, ante_mask) -> Floats2d:
     # mention_gold: 1d, idx = mention id, val = cluster id (0 for none)
     # selected_mentions: non-pruned idxs after crossing eliminated
     # top_ants: idx of top antecedents from topk
@@ -486,9 +486,15 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
 
     return (out, sembeds.indices), backprop
 
-def scores2clusters(xp, scores: List[Floats2d], idxs: Ints2d) -> List[List[List[Tuple[int, int]]]]:
+def build_cluster_maker() -> Model[List[Floats2d], Ints2d]:
+    return Model("ClusterMaker", forward=make_clusters)
+
+
+def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> List[List[List[Tuple[int, int]]]]:
     # one item in scores for each doc
     # output: per doc, one list of clusters, which are a list of int spans
+    xp = model.ops.xp
+    scores, idxs = inputs
 
     out = []
     offset = 0
@@ -507,7 +513,14 @@ def scores2clusters(xp, scores: List[Floats2d], idxs: Ints2d) -> List[List[List[
                 starts, ends, score_idx, cscores)
         ic(predicted)
         out.append(predicted)
-    return out
+
+    def backward(dY: List[List[List[Tuple[int, int]]]]) -> Tuple[List[Floats2d], Ints2d]:
+        ic(dY)
+        pass
+
+
+
+    return out, backward
 
 def prep_model():
     nlp = spacy.load("en_core_web_sm")
@@ -532,14 +545,39 @@ def prep_model():
             ),
             build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
             build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [List[Floats2d] (scores), Ints2d (mentions)]
-    #        outputifier # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
+            build_cluster_maker(), # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
             )
     return model
+
+def get_clusters_from_doc(doc) -> List[List[Tuple[int, int]]]:
+    """Given a Doc, convert the cluster spans to simple int tuple lists.
+    """
+    out = []
+    for key, val in doc.spans.items():
+        cluster = []
+        for span in val:
+            # TODO check that there isn't an off-by-one error here
+            cluster.append( (span.start, span.end) )
+        out.append(cluster)
+    return out
+
+def train_loop(nlp):
+    from spacy.tokens import DocBin
+
+    db = DocBin().from_disk("stuff.spacy")
+    docs = db.get_docs(nlp.vocab)
+    for doc in docs:
+        ic(doc)
+        ic(get_clusters_from_doc(doc))
+
 
 if __name__ == "__main__":
     #from thinc.api import get_current_ops
     #ops = get_current_ops()
     #gold_data_test(ops.xp)
+
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
 
     texts = [
             "John called from London, he says it's raining in the city. He's all wet.",
@@ -551,6 +589,7 @@ if __name__ == "__main__":
 
     out, backprop = model(docs, False)
     ic(out)
-    ic(scores2clusters(model.ops.xp, *out))
+
+    train_loop(nlp)
 
 
