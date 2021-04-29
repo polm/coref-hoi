@@ -295,6 +295,7 @@ def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
 
 def get_gold_clusters_array(xp, docs: List[Doc]) -> List[Ints2d]:
     # this assumes the only spans on the doc are coref clusters
+    # XXX this is copied from coref-hoi but probably not necessary
     out = []
     for doc in docs:
         starts = []
@@ -474,12 +475,12 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         # TODO actually backprop to these scores
-        dXscores = ops.alloc1f(*mscores.shape)
+        dXscores = ops.alloc2f(*mscores.shape)
 
         offset = 0
         for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
-            dS = source_b(dy * target.T)
-            dT = target_b(dy * source.T)
+            dS = source_b(target.T @ dy)
+            dT = target_b(dy @ source.T)
             dXembeds[offset:offset+ll] = dS + dT
             offset += ll
         return (dXscores, SpanEmbeddings(sembeds.indices, dXembeds))
@@ -506,19 +507,34 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
         ends = idxs[offset:hi, 1].tolist()
         score_idx = xp.argsort(-1 * cscores, 1)
 
-        ic(starts, ends)
-        ic(cscores)
-        ic(score_idx)
+        # need to add the dummy
+        dummy = model.ops.alloc2f(cscores.shape[0], 1)
+        cscores = xp.concatenate( (dummy, cscores), 1)
+        ic(cscores.shape)
+
         predicted = get_predicted_clusters(
                 starts, ends, score_idx, cscores)
-        ic(predicted)
+        #ic(predicted)
         out.append(predicted)
 
     def backward(dY: List[List[List[Tuple[int, int]]]]) -> Tuple[List[Floats2d], Ints2d]:
-        ic(dY)
-        pass
+        offset = 0
+        dXs = []
+        for docgold, cscores in zip(dY, scores):
 
+            ll = cscores.shape[0]
+            hi = offset + ll
+            gscores = create_gold_scores(idxs[offset:hi], docgold)
+            ic(gscores)
+            gscores = xp.asarray(gscores)
 
+            # can probably save this somewhere
+            dummy = model.ops.alloc2f(cscores.shape[0], 1)
+            cscores = xp.concatenate( (dummy, cscores), 1)
+
+            dXs.append(cscores - gscores)
+            ic(dXs[-1])
+        return dXs, idxs
 
     return out, backward
 
@@ -561,14 +577,98 @@ def get_clusters_from_doc(doc) -> List[List[Tuple[int, int]]]:
         out.append(cluster)
     return out
 
-def train_loop(nlp):
+def make_clean_doc(nlp, doc):
+    """Return a doc with raw data but not span annotations."""
+    # Surely there is a better way to do this?
+
+    sents = [tok.is_sent_start for tok in doc]
+    words = [tok.text for tok in doc]
+    out = Doc(nlp.vocab, words=words, sent_starts=sents)
+    return out
+
+def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]):
+    """Given mentions considered for antecedents and gold clusters,
+    construct a gold score matrix."""
+    # make a mapping of mentions to cluster id
+    # id is not important but equality will be
+    ment2cid = {}
+    for cid, cluster in enumerate(clusters):
+        for ment in cluster:
+            ment2cid[ment] = cid
+
+    out = []
+    mentuples = [tuple(mm) for mm in ments]
+    for ii, ment in enumerate(mentuples):
+        if ment not in ment2cid:
+            # this is not in a cluster so it's a dummy
+            out.append([True] + ([False] * len(ments)))
+            continue
+
+        # this might change if no real antecedent is a candidate
+        row = [False] 
+        cid = ment2cid[ment]
+        for jj, ante in enumerate(mentuples):
+            # antecedents must come first
+            if jj >= ii: 
+                row.append(False)
+                continue
+
+            row.append(cid == ment2cid.get(ante, -1))
+
+        if not any(row):
+            row[0] = True # dummy
+        out.append(row)
+
+    # caller needs to convert to array
+    return out
+
+
+def load_training_data(nlp, path):
     from spacy.tokens import DocBin
 
-    db = DocBin().from_disk("stuff.spacy")
-    docs = db.get_docs(nlp.vocab)
-    for doc in docs:
-        ic(doc)
-        ic(get_clusters_from_doc(doc))
+    db = DocBin().from_disk(path)
+    docs = list(db.get_docs(nlp.vocab))
+
+    #TODO check if this has issues with gold tokenization
+    raw = [make_clean_doc(nlp, doc) for doc in docs]
+    return raw, docs
+
+def train_loop(nlp):
+    model = prep_model()
+    train_X, train_Y = load_training_data(nlp, "stuff.spacy")
+
+    print(f"Loaded {len(train_X)} examples to train on")
+
+    from thinc.api import Adam, fix_random_seed
+    from tqdm import tqdm
+
+    fix_random_seed(23)
+    optimizer = Adam(0.001)
+    batch_size = 32
+    epochs = 10
+
+    for ii in range(epochs):
+        batches = model.ops.multibatch(batch_size, train_X, train_Y, shuffle=True)
+        for X, Y in tqdm(batches):
+            Yh, backprop = model.begin_update(X)
+            # Yh is List[List[List[Tuple[int, int]]]]
+
+            clusters = [get_clusters_from_doc(yy) for yy in Y]
+            backprop(clusters)
+
+            model.finish_update(optimizer)
+        # TODO evaluate
+        """
+        correct = 0
+        total = 0
+        for X, Y in model.ops.multibatch(batch_size, dev_X, dev_Y):
+            Yh = model.predict(X)
+            correct += (Yh.argmax(axis=1) == Y.argmax(axis=1)).sum()
+            total += Yh.shape[0]
+
+        score = correct / total
+        print(f" {i} accuracy: {float(score):.3f}")
+        """
 
 
 if __name__ == "__main__":
@@ -583,12 +683,12 @@ if __name__ == "__main__":
             "John called from London, he says it's raining in the city. He's all wet.",
             "Tarou went to Tokyo Tower. It was sunny there.",
             ]
-    docs = [nlp(text) for text in texts]
+    #docs = [nlp(text) for text in texts]
 
-    model = prep_model()
+    #model = prep_model()
 
-    out, backprop = model(docs, False)
-    ic(out)
+    #out, backprop = model(docs, False)
+    #ic(out)
 
     train_loop(nlp)
 
