@@ -501,6 +501,12 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
             #ic(dy.shape, source.shape, target.shape)
             #ic(dy.dtype, source.dtype, target.dtype)
+
+            # first undo the mask so there are no infinite values
+            dy[dy == -xp.inf] = 0
+            #ic(target)
+            #ic(dy)
+            #ic(xp.isnan(target).any(), xp.isnan(source).any(), xp.isnan(dy).any())
             dS = source_b(dy @ target)
             dT = target_b(dy @ source)
             dXembeds.data[offset:offset+ll] = dS + dT
@@ -540,7 +546,7 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
         #ic(cscores.shape)
 
         predicted = get_predicted_clusters(
-                starts, ends, score_idx, cscores)
+                xp, starts, ends, score_idx, cscores)
         #ic(predicted)
         out.append(predicted)
 
