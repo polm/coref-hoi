@@ -139,6 +139,8 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
 
     tokvecs, docs = inputs
 
+    dim = tokvecs[0].shape[1]
+
     mgen = model.attrs["mention_generator"]
     mentions = ops.alloc2i(0, 2)
     total_length = 0
@@ -169,23 +171,36 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
     embeds = Ragged(concat, docmenlens)
 
     def backprop_span_embed(dY: SpanEmbeddings) -> Tuple[List[Floats2d], List[Doc]]:
-        # how does this work?
-        tokvecs[0].shape[0] # TODO get this properly
-        dX = [ops.alloc2f(len(doc), dim) for doc in docs]
 
-        docidx = 0
-        offset = len(docs[docidx])
-        for mi in range(0, len(dY.indices)):
-            start, end = dY.indices[mi, :]
-            if end > offset + len(docs[docidx]):
-                docidx += 1
-                offset += len(docs[docidx])
+        oweights = []
+        odocs = []
+        offset = 0
+        tokoffset = 0
+        for indoc, mlen in zip(docs, dY.vectors.lengths):
+            hi = offset + mlen
+            hitok = tokoffset + len(indoc)
+            odocs.append(indoc) # no change
+            vecs = dY.vectors.data[offset:hi]
 
-            # get the tokvec
-            embed = dY.vectors.data[mi, :]
-            #XXX probably better to divide by number of tokens
-            dX[start:end] += embed
-        return dX
+            starts = vecs[:, :dim]
+            ends = vecs[:, dim: 2 * dim]
+            spanvecs = vecs[:, 2 * dim:]
+
+            out = model.ops.alloc2f(len(indoc), dim)
+
+            for ii, (start, end) in enumerate(dY.indices[offset:hi]):
+                # adjust indexes to align with doc
+                start -= tokoffset
+                end -= tokoffset
+
+                out[start] += starts[ii]
+                out[end] += ends[ii]
+                out[start:end] += spanvecs[ii]
+            oweights.append(out)
+
+            offset = hi
+            tokoffset = hitok
+        return oweights, odocs
 
     return SpanEmbeddings(mentions, embeds), backprop_span_embed
 
@@ -258,8 +273,8 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
         dXscores[selected] = dYscores.squeeze()
 
         dXvecs = model.ops.alloc2f(*spanembeds.vectors.data.shape)
-        ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
-        ic(spanembeds.indices.shape)
+        #ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
+        #ic(spanembeds.indices.shape)
         dXvecs[selected] = dYembeds.vectors.data
         dXembeds = SpanEmbeddings(spanembeds.indices, dXvecs)
 
@@ -422,9 +437,7 @@ def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
 
 def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
     def backprop(dY: Floats2d) -> SpanEmbeddings:
-        ic("TAKE VECS BACK")
         vecs = Ragged(dY, inputs.vectors.lengths)
-        ic(dY.shape, inputs.vectors.data.shape)
         return SpanEmbeddings(inputs.indices, vecs)
 
     return inputs.vectors.data, backprop
@@ -482,20 +495,18 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
     def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
-        # TODO actually backprop to these scores
-        ic(mscores.shape, pw_sum.shape, sum(vecs.lengths))
         dXscores = ops.alloc1f(*mscores.shape)
 
         offset = 0
         for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
-            ic(dy.shape, source.shape, target.shape)
-            ic(dy.dtype, source.dtype, target.dtype)
+            #ic(dy.shape, source.shape, target.shape)
+            #ic(dy.dtype, source.dtype, target.dtype)
             dS = source_b(dy @ target)
             dT = target_b(dy @ source)
             dXembeds.data[offset:offset+ll] = dS + dT
             # TODO really unsure about this, check it
             dXscores[offset:offset+ll] = xp.diag(dy)
-            ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
+            #ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
             offset += ll
         # make it fit back into the linear
         dXscores = xp.expand_dims(dXscores, 1)
