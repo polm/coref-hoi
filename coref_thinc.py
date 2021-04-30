@@ -39,6 +39,36 @@ def tuplify_forward(model, X, is_train):
 
     return tuple(Ys), backprop_tuplify
 
+
+def tuplify_span_embeds(layer1: Model, layer2: Model, *layers) -> Model:
+    layers = (layer1, layer2) + layers
+    names = [layer.name for layer in layers]
+    return Model(
+            "tuple(" + ", ".join(names) + ")", 
+            tuplify_span_embeds_forward, 
+            layers=layers,
+    )
+
+
+def tuplify_span_embeds_forward(model, X, is_train):
+    Ys = []
+    backprops = []
+    for layer in model.layers:
+        Y, backprop = layer(X, is_train)
+        Ys.append(Y)
+        backprops.append(backprop)
+
+    def backprop_tuplify(dYs):
+        dXs = [bp(dY) for bp, dY in zip(backprops, dYs)]
+        dX = dXs[0]
+        # indices / lengths are the same
+        for dx in dXs[1:]:
+            dX.vectors.data += dx.vectors.data
+        return dX
+
+    return tuple(Ys), backprop_tuplify
+
+
 @dataclass
 class SpanEmbeddings:
     indices: Ints2d # Array with 2 columns (for start and end index)
@@ -220,15 +250,25 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
         dYscores, dYembeds = dY
 
         dXscores = model.ops.alloc1f(ll) 
-        dXscores[selected] = dYscores
+        #ic(dXscores.shape, selected.shape, dYscores.shape)
+        # I think we only backprop the selected ones here?
+        # TODO check this
+        #dXscores[selected] = dYscores[selected]
+        # actually, maybe this is pass through?
+        dXscores[selected] = dYscores.squeeze()
 
-        dXvecs = model.ops.alloc2f(inputs.vectors.shape)
-        dXvecs[selected] = dYembeds
-        dXembeds = SpanEmbeddings(inputs.indices, dXvecs)
+        dXvecs = model.ops.alloc2f(*spanembeds.vectors.data.shape)
+        ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
+        ic(spanembeds.indices.shape)
+        dXvecs[selected] = dYembeds.vectors.data
+        dXembeds = SpanEmbeddings(spanembeds.indices, dXvecs)
+
+        # inflate for mention scorer
+        dXscores = model.ops.xp.expand_dims(dXscores, 1)
 
         return (dXscores, dXembeds)
 
-    return (rawscores, out), coarse_prune_backprop
+    return (scores[selected], out), coarse_prune_backprop
 
 def batch_select(xp, tensor, idx):
     # this is basically used to apply 2d indices to Floats2d
@@ -382,7 +422,9 @@ def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
 
 def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
     def backprop(dY: Floats2d) -> SpanEmbeddings:
+        ic("TAKE VECS BACK")
         vecs = Ragged(dY, inputs.vectors.lengths)
+        ic(dY.shape, inputs.vectors.data.shape)
         return SpanEmbeddings(inputs.indices, vecs)
 
     return inputs.vectors.data, backprop
@@ -437,19 +479,26 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         offset += ll
         backprops.append( (source_b, target_b, source, target) )
 
-    def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats1d, SpanEmbeddings]:
-        # TODO check that this is actually right
+    def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         # TODO actually backprop to these scores
-        dXscores = ops.alloc2f(*mscores.shape)
+        ic(mscores.shape, pw_sum.shape, sum(vecs.lengths))
+        dXscores = ops.alloc1f(*mscores.shape)
 
         offset = 0
         for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
-            dS = source_b(target.T @ dy)
-            dT = target_b(dy @ source.T)
-            dXembeds[offset:offset+ll] = dS + dT
+            ic(dy.shape, source.shape, target.shape)
+            ic(dy.dtype, source.dtype, target.dtype)
+            dS = source_b(dy @ target)
+            dT = target_b(dy @ source)
+            dXembeds.data[offset:offset+ll] = dS + dT
+            # TODO really unsure about this, check it
+            dXscores[offset:offset+ll] = xp.diag(dy)
+            ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
             offset += ll
+        # make it fit back into the linear
+        dXscores = xp.expand_dims(dXscores, 1)
         return (dXscores, SpanEmbeddings(sembeds.indices, dXembeds))
 
     return (out, sembeds.indices), backprop
@@ -477,7 +526,7 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
         # need to add the dummy
         dummy = model.ops.alloc2f(cscores.shape[0], 1)
         cscores = xp.concatenate( (dummy, cscores), 1)
-        ic(cscores.shape)
+        #ic(cscores.shape)
 
         predicted = get_predicted_clusters(
                 starts, ends, score_idx, cscores)
@@ -492,15 +541,21 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
             ll = cscores.shape[0]
             hi = offset + ll
             gscores = create_gold_scores(idxs[offset:hi], docgold)
-            ic(gscores)
-            gscores = xp.asarray(gscores)
+            #ic(gscores)
+            gscores = model.ops.asarray2f(gscores)
+            # remove the dummy
+            gscores = gscores[:,1:]
 
             # can probably save this somewhere
-            dummy = model.ops.alloc2f(cscores.shape[0], 1)
-            cscores = xp.concatenate( (dummy, cscores), 1)
+            #dummy = model.ops.alloc2f(cscores.shape[0], 1)
+            #cscores = xp.concatenate( (dummy, cscores), 1)
 
-            dXs.append(cscores - gscores)
-            ic(dXs[-1])
+            # this shouldn't be necessary but for some reason one is a double and
+            # one is a float.
+            diff = model.ops.asarray2f(cscores - gscores)
+            dXs.append(diff)
+            #ic(dXs[-1])
+            #ic(cscores.dtype, gscores.dtype, dXs[-1].dtype)
         return dXs, idxs
 
     return out, backward
@@ -513,7 +568,7 @@ def prep_model():
     span_embedder = build_span_embedder(get_candidate_mentions)
 
     hidden = 1000
-    mention_scorer = chain(Linear(dim, hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
+    mention_scorer = chain(Linear(nI=dim, nO=hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
     mention_scorer.initialize()
 
     bilinear = chain(Linear(nI=dim, nO=dim), Dropout(0.3))
@@ -522,8 +577,11 @@ def prep_model():
     model = chain(
             tuplify(tok2vec, noop()),
             span_embedder,
-            tuplify(
-                chain(build_take_vecs(), mention_scorer), 
+            #XXX this doesn't work
+            tuplify_span_embeds(
+                # output here is technically floats2d...
+                # maybe needs with_flatten.
+                chain(build_take_vecs(), mention_scorer),  
                 noop()
             ),
             build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
