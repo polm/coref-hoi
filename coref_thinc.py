@@ -243,89 +243,6 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
 
     return (scores[selected], out), coarse_prune_backprop
 
-def get_gold_clusters_array(xp, docs: List[Doc]) -> List[Ints2d]:
-    # this assumes the only spans on the doc are coref clusters
-    # XXX this is copied from coref-hoi but probably not necessary
-    out = []
-    for doc in docs:
-        starts = []
-        ends = []
-        ids = []
-        # XXX technically the original data has ids, but we only care about equality
-        # first just get the data in lists
-        for ii, cluster in enumerate(doc.spans.values(), start=1):
-            for span in cluster:
-                starts.append(span.start)
-                ends.append(span.end)
-                ids.append(ii)
-
-        # make it arrays
-        starts = xp.asarray(starts)
-        ends = xp.asarray(ends)
-        ids = xp.asarray(ids)
-
-        out.append( xp.column_stack( (starts, ends, ids) ) )
-    return out
-
-def get_gold_mention_labels(xp, mentions: List[Ints2d], gold_clusters: List[Ints2d]):
-    """Given mentions and gold clusters, find the gold cluster ID for each mention.
-    If the mention is not a gold mention the label will be 0.
-
-    The inputs are each a list with one entry per doc."""
-    # this creates an equivalent to the top_antecedent_gold_labels
-
-    out = []
-
-    for ments, gold in zip(mentions, gold_clusters):
-        gold_starts = gold[:, 0]
-        gold_ends = gold[:, 1]
-        gold_ids = gold[:, 2]
-        ment_starts = ments[:, 0]
-        ment_ends = ments[:, 1]
-
-
-        same_start = xp.expand_dims(gold_starts, 1) == xp.expand_dims(ment_starts, 0)
-        same_end = xp.expand_dims(gold_ends, 1) == xp.expand_dims(ment_ends, 0)
-        same_span = (same_start & same_end).astype(float)
-        gids = xp.expand_dims(gold_ids, 0).astype(float)
-        labels = xp.matmul( gids, same_span ).astype(int)
-        # this is equivalent to candidate_labels in coref-hoi
-        # 1d array of integers where:
-        # idx: index in mention list
-        # value: cluster id (start at 1, 0 means no cluster/wrong)
-        labels = xp.squeeze(labels, 0)
-        out.append(labels)
-    return out
-
-def get_antecedent_gold(xp, mention_gold: Ints1d, selected_mentions: Ints2d, top_antes, ante_mask) -> Floats2d:
-    # mention_gold: 1d, idx = mention id, val = cluster id (0 for none)
-    # selected_mentions: non-pruned idxs after crossing eliminated
-    # top_ants: idx of top antecedents from topk
-    top_ment_clusters = mention_gold[selected_mentions]
-
-    top_ante_clusters = top_ment_clusters[top_antes]
-    # this is magic designed to mask invalid ids
-    top_ante_clusters += (ante_mask.to(int) - 1) * 100000
-    same_gold = (top_ante_clusters == xp.expand_dims(top_ment_clusters, 1))
-    non_dummy = xp.expand_dims(top_ment_clusters > 0, 1)
-    pairwise_labels = same_gold & non_dummy
-
-    dummy_ante = xp.logical_not(pairwise_labels.any(axis=1, keepdims=True))
-    ante_gold = xp.concatenate([dummy_ante, pairwise_labels], axis=1)
-    return ante_gold
-
-def gold_data_test(xp):
-    mentions = Pairs([1, 2, 3], [2, 4, 7])
-    Span = namedtuple("DummySpan", ('start', 'end'))
-    gold_clusters = [
-            ( Span(1, 2), Span(2, 4) ),
-            ( Span(5, 7), Span(8, 9) ),
-            ]
-
-    res = get_gold_matrix(xp, mentions, None, gold_clusters)
-    ic(res)
-
-
 def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
     # this just gets vectors out of spanembeddings
     return Model("TakeVecs", forward=take_vecs_forward)
@@ -501,27 +418,6 @@ def prep_model():
             build_cluster_maker(), # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
             )
     return model
-
-def get_clusters_from_doc(doc) -> List[List[Tuple[int, int]]]:
-    """Given a Doc, convert the cluster spans to simple int tuple lists.
-    """
-    out = []
-    for key, val in doc.spans.items():
-        cluster = []
-        for span in val:
-            # TODO check that there isn't an off-by-one error here
-            cluster.append( (span.start, span.end) )
-        out.append(cluster)
-    return out
-
-def make_clean_doc(nlp, doc):
-    """Return a doc with raw data but not span annotations."""
-    # Surely there is a better way to do this?
-
-    sents = [tok.is_sent_start for tok in doc]
-    words = [tok.text for tok in doc]
-    out = Doc(nlp.vocab, words=words, sent_starts=sents)
-    return out
 
 def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]):
     """Given mentions considered for antecedents and gold clusters,

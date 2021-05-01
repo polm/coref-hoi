@@ -1,7 +1,8 @@
 # This is a new file for the spaCy model
 # it holds functions not directly part of the model
-from thinc.types import Pairs
+from thinc.types import Pairs, Ints2d
 from spacy.tokens import Doc
+from typing import List, Tuple
 
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
@@ -83,5 +84,72 @@ def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
                 ends.append(ei)
 
     return Pairs(begins, ends)
+
+def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
+    """Given a list of spans sorted in descending order, return the indexes of
+    spans to keep, discarding spans that cross.
+
+    Nested spans are allowed.
+    """
+    # ported from Model._extract_top_spans
+    selected = []
+    start_to_max_end = {}
+    end_to_min_start = {}
+
+    for idx in idxs:
+        if len(selected) >= limit or idx > len(starts):
+            break
+
+        start, end = starts[idx], ends[idx]
+        cross = False
+
+        for ti in range(start, end + 1):
+            max_end = start_to_max_end.get(ti, -1)
+            if ti > start and max_end > end:
+                cross = True
+                break
+
+            min_start = end_to_min_start.get(ti, -1)
+            if ti < end and 0 <= min_start < start:
+                cross = True
+                break
+
+        if not cross:
+            # this index will be kept
+            # record it so we can exclude anything that crosses it
+            selected.append(idx)
+            max_end = start_to_max_end.get(start, -1)
+            if end > max_end:
+                start_to_max_end[start] = end
+            min_start = end_to_min_start.get(end, -1)
+            if start == -1 or start < min_start:
+                end_to_min_start[end] = start
+
+    # sort idxs by order in doc
+    selected = sorted(selected, key=lambda idx: (starts[idx], ends[idx]))
+    while len(selected) < limit:
+        selected.append(selected[0]) # this seems a bit weird?
+    return selected
+
+def get_clusters_from_doc(doc) -> List[List[Tuple[int, int]]]:
+    """Given a Doc, convert the cluster spans to simple int tuple lists.
+    """
+    out = []
+    for key, val in doc.spans.items():
+        cluster = []
+        for span in val:
+            # TODO check that there isn't an off-by-one error here
+            cluster.append( (span.start, span.end) )
+        out.append(cluster)
+    return out
+
+def make_clean_doc(nlp, doc):
+    """Return a doc with raw data but not span annotations."""
+    # Surely there is a better way to do this?
+
+    sents = [tok.is_sent_start for tok in doc]
+    words = [tok.text for tok in doc]
+    out = Doc(nlp.vocab, words=words, sent_starts=sents)
+    return out
 
 
