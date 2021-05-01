@@ -9,7 +9,7 @@ from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
 from coref_util import get_predicted_clusters, get_candidate_mentions, select_non_crossing_spans
-from coref_util import get_clusters_from_docf, make_clean_doc, create_gold_scores
+from coref_util import get_clusters_from_doc, make_clean_doc, create_gold_scores
 
 from icecream import ic
 
@@ -366,15 +366,23 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
     def backward(dY: List[List[List[Tuple[int, int]]]]) -> Tuple[List[Floats2d], Ints2d]:
         offset = 0
         dXs = []
+        loss = 0
         for docgold, cscores in zip(dY, scores):
 
             ll = cscores.shape[0]
             hi = offset + ll
             gscores = create_gold_scores(idxs[offset:hi], docgold)
             #ic(gscores)
+            # boolean to float
             gscores = model.ops.asarray2f(gscores)
             # remove the dummy
-            gscores = gscores[:,1:]
+            #gscores = gscores[:,1:]
+            # add the dummy to cscores
+            dummy = model.ops.alloc2f(ll, 1)
+            cscores = xp.concatenate( (dummy, cscores), 1 )
+            with xp.errstate(divide="ignore"):
+                log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
+            log_norm = xp.logaddexp.reduce(cscores, 1)
 
             # can probably save this somewhere
             #dummy = model.ops.alloc2f(cscores.shape[0], 1)
@@ -383,9 +391,15 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Lis
             # this shouldn't be necessary but for some reason one is a double and
             # one is a float.
             diff = model.ops.asarray2f(cscores - gscores)
+            # remove the dummy, which doesn't backprop
+            diff = diff[:, 1:]
             dXs.append(diff)
+
+            # do loss calcs
+            loss += xp.sum(log_norm - log_marg)
             #ic(dXs[-1])
             #ic(cscores.dtype, gscores.dtype, dXs[-1].dtype)
+        print("Cluster loss: ", loss)
         return dXs, idxs
 
     return out, backward
@@ -454,8 +468,13 @@ def train_loop(nlp):
             backprop(clusters)
 
             model.finish_update(optimizer)
-        # TODO evaluate
-        """
+            print("Example:")
+            print(X[0])
+            for key, val in clusters[0].items():
+                print(key, "::", val)
+        # TODO evaluate on dev data
+        dev_X = train_X
+        dev_Y = train_Y
         correct = 0
         total = 0
         for X, Y in model.ops.multibatch(batch_size, dev_X, dev_Y):
