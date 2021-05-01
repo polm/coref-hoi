@@ -8,7 +8,7 @@ from spacy.tokens import Doc, Span
 from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
-from coref_util import get_predicted_clusters, get_candidate_mentions
+from coref_util import get_predicted_clusters, get_candidate_mentions, select_non_crossing_spans
 
 from icecream import ic
 
@@ -242,69 +242,6 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
         return (dXscores, dXembeds)
 
     return (scores[selected], out), coarse_prune_backprop
-
-def batch_select(xp, tensor, idx):
-    # this is basically used to apply 2d indices to Floats2d
-    # original comment:
-    # do selection per row (first axis)
-    n0, n1 = tensor.shape[0], tensor.shape[1]
-
-    offset = xp.expand_dims(xp.arange(0, n0) * n1, 1)
-    nidx = idx + offset
-    tt = xp.reshape(tensor, [n0 * n1, -1])
-    selected = tt[nidx]
-
-    if tt.shape[-1] == 1:
-        selected = xp.squeeze(selected, -1)
-
-    return selected
-
-
-def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
-    """Given a list of spans sorted in descending order, return the indexes of
-    spans to keep, discarding spans that cross.
-
-    Nested spans are allowed.
-    """
-    # ported from Model._extract_top_spans
-    selected = []
-    start_to_max_end = {}
-    end_to_min_start = {}
-
-    for idx in idxs:
-        if len(selected) >= limit or idx > len(starts):
-            break
-
-        start, end = starts[idx], ends[idx]
-        cross = False
-
-        for ti in range(start, end + 1):
-            max_end = start_to_max_end.get(ti, -1)
-            if ti > start and max_end > end:
-                cross = True
-                break
-
-            min_start = end_to_min_start.get(ti, -1)
-            if ti < end and 0 <= min_start < start:
-                cross = True
-                break
-
-        if not cross:
-            # this index will be kept
-            # record it so we can exclude anything that crosses it
-            selected.append(idx)
-            max_end = start_to_max_end.get(start, -1)
-            if end > max_end:
-                start_to_max_end[start] = end
-            min_start = end_to_min_start.get(end, -1)
-            if start == -1 or start < min_start:
-                end_to_min_start[end] = start
-
-    # sort idxs by order in doc
-    selected = sorted(selected, key=lambda idx: (starts[idx], ends[idx]))
-    while len(selected) < limit:
-        selected.append(selected[0]) # this seems a bit weird?
-    return selected
 
 def get_gold_clusters_array(xp, docs: List[Doc]) -> List[Ints2d]:
     # this assumes the only spans on the doc are coref clusters
