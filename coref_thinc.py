@@ -8,7 +8,7 @@ from spacy.tokens import Doc, Span
 from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
-from coref_model_wrapped import get_predicted_clusters
+from coref_util import get_predicted_clusters, get_candidate_mentions
 
 from icecream import ic
 
@@ -81,48 +81,6 @@ class SpanEmbeddings:
     # which would be bad.
     # The lengths in the Ragged are not the tokens per doc, but the number of 
     # mentions per doc.
-
-
-@dataclass
-class Mentions:
-    """A collection of mentions. Each mention is a span of text with token
-    indices and a vector representation.
-    """
-    vecs: Floats2d
-    idxs: Pairs[int]
-
-def get_sentence_map(doc: Doc):
-    """For the given span, return a list of sentence indexes."""
-
-    si = 0
-    out = []
-    for sent in doc.sents:
-        for tok in sent:
-            out.append(si)
-        si += 1
-    return out
-
-def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
-    """Given a Doc, return candidate mentions.
-
-    This isn't a trainable layer, it just returns raw candidates.
-    """
-    # XXX Note that in coref-hoi the indexes are designed so you actually want [i:j+1], but here
-    # we're using [i:j], which is more natural.
-
-    sentence_map = get_sentence_map(doc)
-
-    begins = []
-    ends = []
-    for tok in doc:
-        si = sentence_map[tok.i] # sentence index
-        for ii in range(1, max_span_width):
-            ei = tok.i + ii # end index
-            if ei < len(doc) and sentence_map[ei] == si:
-                begins.append(tok.i)
-                ends.append(ei)
-
-    return Pairs(begins, ends)
 
 # model converting a Doc/Mention to span embeddings
 # mention_generator: Callable[Doc, Pairs[int]]
