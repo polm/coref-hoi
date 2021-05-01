@@ -152,4 +152,41 @@ def make_clean_doc(nlp, doc):
     out = Doc(nlp.vocab, words=words, sent_starts=sents)
     return out
 
+def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]):
+    """Given mentions considered for antecedents and gold clusters,
+    construct a gold score matrix."""
+    # make a mapping of mentions to cluster id
+    # id is not important but equality will be
+    ment2cid = {}
+    for cid, cluster in enumerate(clusters):
+        for ment in cluster:
+            ment2cid[ment] = cid
+
+    out = []
+    mentuples = [tuple(mm) for mm in ments]
+    for ii, ment in enumerate(mentuples):
+        if ment not in ment2cid:
+            # this is not in a cluster so it's a dummy
+            out.append([True] + ([False] * len(ments)))
+            continue
+
+        # this might change if no real antecedent is a candidate
+        row = [False] 
+        cid = ment2cid[ment]
+        for jj, ante in enumerate(mentuples):
+            # antecedents must come first
+            if jj >= ii: 
+                row.append(False)
+                continue
+
+            row.append(cid == ment2cid.get(ante, -1))
+
+        if not any(row):
+            row[0] = True # dummy
+        out.append(row)
+
+    # caller needs to convert to array
+    return out
+
+
 

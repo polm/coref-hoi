@@ -9,6 +9,7 @@ from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
 from coref_util import get_predicted_clusters, get_candidate_mentions, select_non_crossing_spans
+from coref_util import get_clusters_from_docf, make_clean_doc, create_gold_scores
 
 from icecream import ic
 
@@ -419,43 +420,6 @@ def prep_model():
             )
     return model
 
-def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]):
-    """Given mentions considered for antecedents and gold clusters,
-    construct a gold score matrix."""
-    # make a mapping of mentions to cluster id
-    # id is not important but equality will be
-    ment2cid = {}
-    for cid, cluster in enumerate(clusters):
-        for ment in cluster:
-            ment2cid[ment] = cid
-
-    out = []
-    mentuples = [tuple(mm) for mm in ments]
-    for ii, ment in enumerate(mentuples):
-        if ment not in ment2cid:
-            # this is not in a cluster so it's a dummy
-            out.append([True] + ([False] * len(ments)))
-            continue
-
-        # this might change if no real antecedent is a candidate
-        row = [False] 
-        cid = ment2cid[ment]
-        for jj, ante in enumerate(mentuples):
-            # antecedents must come first
-            if jj >= ii: 
-                row.append(False)
-                continue
-
-            row.append(cid == ment2cid.get(ante, -1))
-
-        if not any(row):
-            row[0] = True # dummy
-        out.append(row)
-
-    # caller needs to convert to array
-    return out
-
-
 def load_training_data(nlp, path):
     from spacy.tokens import DocBin
 
@@ -501,13 +465,9 @@ def train_loop(nlp):
 
         score = correct / total
         print(f" {i} accuracy: {float(score):.3f}")
-        """
 
 
 if __name__ == "__main__":
-    #from thinc.api import get_current_ops
-    #ops = get_current_ops()
-    #gold_data_test(ops.xp)
 
     import spacy
     nlp = spacy.load("en_core_web_sm")
@@ -516,13 +476,6 @@ if __name__ == "__main__":
             "John called from London, he says it's raining in the city. He's all wet.",
             "Tarou went to Tokyo Tower. It was sunny there.",
             ]
-    #docs = [nlp(text) for text in texts]
-
-    #model = prep_model()
-
-    #out, backprop = model(docs, False)
-    #ic(out)
-
     train_loop(nlp)
 
 
