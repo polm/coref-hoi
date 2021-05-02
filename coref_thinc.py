@@ -41,35 +41,6 @@ def tuplify_forward(model, X, is_train):
     return tuple(Ys), backprop_tuplify
 
 
-def tuplify_span_embeds(layer1: Model, layer2: Model, *layers) -> Model:
-    layers = (layer1, layer2) + layers
-    names = [layer.name for layer in layers]
-    return Model(
-            "tuple(" + ", ".join(names) + ")", 
-            tuplify_span_embeds_forward, 
-            layers=layers,
-    )
-
-
-def tuplify_span_embeds_forward(model, X, is_train):
-    Ys = []
-    backprops = []
-    for layer in model.layers:
-        Y, backprop = layer(X, is_train)
-        Ys.append(Y)
-        backprops.append(backprop)
-
-    def backprop_tuplify(dYs):
-        dXs = [bp(dY) for bp, dY in zip(backprops, dYs)]
-        dX = dXs[0]
-        # indices / lengths are the same
-        for dx in dXs[1:]:
-            dX.vectors.data += dx.vectors.data
-        return dX
-
-    return tuple(Ys), backprop_tuplify
-
-
 @dataclass
 class SpanEmbeddings:
     indices: Ints2d # Array with 2 columns (for start and end index)
@@ -82,6 +53,20 @@ class SpanEmbeddings:
     # which would be bad.
     # The lengths in the Ragged are not the tokens per doc, but the number of 
     # mentions per doc.
+
+    def __add__(self, right):
+        # XXX is something like this necessary?
+        #assert self.indices == right.indices, "Can only add with equal indices"
+        #assert self.vectors.lengths == right.vectors.lengths, "Can only add with equal lengths"
+
+        out = self.vectors.data + right.vectors.data
+        return SpanEmbeddings(self.indices, Ragged(out, self.vectors.lengths))
+
+    def __iadd__(self, right):
+        self.vectors.data += right.vectors.data
+        return self
+
+
 
 # model converting a Doc/Mention to span embeddings
 # mention_generator: Callable[Doc, Pairs[int]]
@@ -422,7 +407,7 @@ def prep_model():
             tuplify(tok2vec, noop()),
             span_embedder,
             #XXX this doesn't work
-            tuplify_span_embeds(
+            tuplify(
                 # output here is technically floats2d...
                 # maybe needs with_flatten.
                 chain(build_take_vecs(), mention_scorer),  
