@@ -13,6 +13,9 @@ from coref_util import get_clusters_from_doc, make_clean_doc, create_gold_scores
 
 from icecream import ic
 
+# type alias to make writing htis less tedious
+MentionClusters = List[List[Tuple[int, int]]
+
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
     names = [layer.name for layer in layers]
@@ -240,10 +243,14 @@ def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
 
     return inputs.vectors.data, backprop
 
-def build_ant_scorer(bilinear, dropout) -> Model[SpanEmbeddings, List[Floats2d]]: 
+def build_ant_scorer(bilinear, dropout, ant_limit=50) -> Model[SpanEmbeddings, List[Floats2d]]: 
     return Model("AntScorer", 
             forward=ant_scorer_forward,
-            layers=[bilinear, dropout])
+            layers=[bilinear, dropout],
+            attrs={
+                "ant_limit": ant_limit,
+                },
+            )
 
 def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Tuple[List[Floats2d], Ints2d]:
     ops = model.ops
@@ -286,6 +293,15 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
 
         scores = pw_prod + pw_sum + mask
         out.append(scores)
+        #TODO this should be topk'd 
+        # this is the index in the original scores, which is also the mention index
+        #top_scores_idx = xp.argsort(-1 * scores, 1)[:,:ant_limit]
+        # These are the actual scores
+        #top_scores = scores[top_scores_idx]
+        #out.append( (top_scores, top_scores_idx) )
+
+        # In the full model these scores can be further refined. In the current
+        # state of this model we're done here, so this pruning is less important.
 
         offset += ll
         backprops.append( (source_b, target_b, source, target) )
@@ -322,7 +338,7 @@ def build_cluster_maker() -> Model[List[Floats2d], Ints2d]:
     return Model("ClusterMaker", forward=make_clusters)
 
 
-def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> List[List[List[Tuple[int, int]]]]:
+def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Tuple[List[List[List[Tuple[int, int]]]], Callable]:
     # one item in scores for each doc
     # output: per doc, one list of clusters, which are a list of int spans
     xp = model.ops.xp
@@ -402,21 +418,16 @@ def prep_model():
 
     bilinear = chain(Linear(nI=dim, nO=dim), Dropout(0.3))
     bilinear.initialize()
+
+    with Model.define_operators({">>": chain}):
+
+        ms = build_take_vecs() >> mention_scorer
  
-    model = chain(
-            tuplify(tok2vec, noop()),
-            span_embedder,
-            #XXX this doesn't work
-            tuplify(
-                # output here is technically floats2d...
-                # maybe needs with_flatten.
-                chain(build_take_vecs(), mention_scorer),  
-                noop()
-            ),
-            build_coarse_pruner(20), # [Floats1d, SpanEmbeds] -> [Floats1d, SpanEmbeds]
-            build_ant_scorer(bilinear, Dropout(0.3)), # [Floats1d, SpanEmbeds] -> [List[Floats2d] (scores), Ints2d (mentions)]
-            build_cluster_maker(), # [Floats2d, Ints2d] -> List[List[Tuple[Int,Int]]]
-            )
+        model = tuplify(tok2vec, noop())
+                >> span_embedder
+                >> tuplify(ms, noop())
+                >> build_coarse_pruner(3900)
+                >> build_ant_scorer(bilinear, Dropout(0.3))
     return model
 
 def load_training_data(nlp, path):
@@ -431,7 +442,7 @@ def load_training_data(nlp, path):
 
 def train_loop(nlp):
     model = prep_model()
-    train_X, train_Y = load_training_data(nlp, "stuff.spacy")
+    train_X, train_Y = load_training_data(nlp, "stuff.spacy")[:100]
 
     print(f"Loaded {len(train_X)} examples to train on")
 
@@ -455,8 +466,9 @@ def train_loop(nlp):
             model.finish_update(optimizer)
             print("Example:")
             print(X[0])
-            for key, val in clusters[0].items():
-                print(key, "::", val)
+            for cluster in Yh[0]:
+                spans = [X[0][ss:ee].text for ss, ee in cluster]
+                print('::', *spans, sep=" | ")
         # TODO evaluate on dev data
         dev_X = train_X
         dev_Y = train_Y
@@ -469,6 +481,114 @@ def train_loop(nlp):
 
         score = correct / total
         print(f" {i} accuracy: {float(score):.3f}")
+
+
+# TODO move this out to a class
+from spacy.trainable_pipe import TrainablePipe
+from spacy.vocab import Vocab
+
+class Coref(TrainablePipe):
+    
+    def __init__(
+            self,
+            vocab: Vocab,
+            model: Model,
+            name: str = "coref",
+            ):
+        """Construct a Coref component."""
+
+        self.vocab = vocab
+        self.model = model
+        self.name = name
+
+    def predict(self, docs: Iterable[Doc]) -> List[MentionClusters]:
+        preds, _ = self.model.predict(docs)
+
+        xp = self.model.ops.xp
+        scores, idxs = preds
+
+        out = []
+        offset = 0
+        for cscores in scores:
+            ll = cscores.shape[0]
+            hi = offset + ll
+
+            starts = idxs[offset:hi, 0].tolist()
+            ends = idxs[offset:hi, 1].tolist()
+            score_idx = xp.argsort(-1 * cscores, 1)
+
+            # need to add the dummy
+            dummy = model.ops.alloc2f(cscores.shape[0], 1)
+            cscores = xp.concatenate( (dummy, cscores), 1)
+
+            predicted = get_predicted_clusters(
+                    xp, starts, ends, score_idx, cscores)
+            out.append(predicted)
+        return out
+
+    def get_loss(self, 
+            examples: Iterable[Example], 
+            # TODO convert next to ragged?
+            score_matrix: List[Floats2d],
+            mention_idx: Ints2d):
+
+        ops = self.model.ops
+        xp = ops.xp
+
+        offset = 0
+        gradients = []
+        loss = 0
+        for example, cscores in zip(examples, score_matrix):
+
+
+            ll = cscores.shape[0]
+            hi = offset + ll
+            gscores = create_gold_scores(mention_idx[offset:hi], example.reference)
+            # boolean to float
+            gscores = ops.asarray2f(gscores)
+            # add the dummy to cscores
+            dummy = model.ops.alloc2f(ll, 1)
+            cscores = xp.concatenate( (dummy, cscores), 1 )
+            with xp.errstate(divide="ignore"):
+                log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
+            log_norm = xp.logaddexp.reduce(cscores, 1)
+
+            diff = model.ops.asarray2f(cscores - gscores)
+            # remove the dummy, which doesn't backprop
+            diff = diff[:, 1:]
+            gradients.append(diff)
+
+            # scalar loss
+            loss += xp.sum(log_norm - log_marg)
+        return loss, gradients
+
+    def update(self, 
+            examples: Iterable[Example],
+            *,
+            sgd: Optional[Optimizer] = None,
+            losses: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        if losses is None:
+            losses = {}
+
+        losses.setdefault(self.name, 0.0)
+        if not examples:
+            return losses
+
+        inputs = (example.predicted for example in examples)
+        preds, backprop = self.model.begin_update(inputs)
+        score_matrix, mention_idx = preds
+        loss, d_scores = self.get_loss(
+                examples, score_matrix, mention_idx)
+        backprop(d_scores)
+
+        if sgd is not None:
+            self.finish_update(sgd)
+
+        losses[self.name] += loss
+
+        return losses
+
 
 
 if __name__ == "__main__":
