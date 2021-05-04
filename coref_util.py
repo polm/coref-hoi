@@ -12,7 +12,7 @@ MentionClusters = List[List[Tuple[int, int]]]
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
     """Get the ID of the antecedent for each span. -1 if no antecedent."""
-    #ic(antecedent_scores)
+    # ic(antecedent_scores)
     predicted_antecedents = []
     for i, idx in enumerate(xp.argmax(antecedent_scores, axis=1) - 1):
         if idx < 0:
@@ -21,8 +21,11 @@ def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
             predicted_antecedents.append(antecedent_idx[i][idx])
     return predicted_antecedents
 
+
 # from model.py, refactored to be non-member
-def get_predicted_clusters(xp, span_starts, span_ends, antecedent_idx, antecedent_scores):
+def get_predicted_clusters(
+    xp, span_starts, span_ends, antecedent_idx, antecedent_scores
+):
     """Convert predictions to usable cluster data.
 
     return values:
@@ -33,7 +36,9 @@ def get_predicted_clusters(xp, span_starts, span_ends, antecedent_idx, anteceden
     antecedent or referrent are omitted from clusters and mention2cluster.
     """
     # Get predicted antecedents
-    predicted_antecedents = get_predicted_antecedents(xp, antecedent_idx, antecedent_scores)
+    predicted_antecedents = get_predicted_antecedents(
+        xp, antecedent_idx, antecedent_scores
+    )
 
     # Get predicted clusters
     mention_to_cluster_id = {}
@@ -41,7 +46,7 @@ def get_predicted_clusters(xp, span_starts, span_ends, antecedent_idx, anteceden
     for i, predicted_idx in enumerate(predicted_antecedents):
         if predicted_idx < 0:
             continue
-        assert i > predicted_idx, f'span idx: {i}; antecedent idx: {predicted_idx}'
+        assert i > predicted_idx, f"span idx: {i}; antecedent idx: {predicted_idx}"
         # Check antecedent's cluster
         antecedent = (int(span_starts[predicted_idx]), int(span_ends[predicted_idx]))
         antecedent_cluster_id = mention_to_cluster_id.get(antecedent, -1)
@@ -57,6 +62,7 @@ def get_predicted_clusters(xp, span_starts, span_ends, antecedent_idx, anteceden
     predicted_clusters = [tuple(c) for c in predicted_clusters]
     return predicted_clusters
 
+
 def get_sentence_map(doc: Doc):
     """For the given span, return a list of sentence indexes."""
 
@@ -67,6 +73,7 @@ def get_sentence_map(doc: Doc):
             out.append(si)
         si += 1
     return out
+
 
 def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
     """Given a Doc, return candidate mentions.
@@ -81,14 +88,15 @@ def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
     begins = []
     ends = []
     for tok in doc:
-        si = sentence_map[tok.i] # sentence index
+        si = sentence_map[tok.i]  # sentence index
         for ii in range(1, max_span_width):
-            ei = tok.i + ii # end index
+            ei = tok.i + ii  # end index
             if ei < len(doc) and sentence_map[ei] == si:
                 begins.append(tok.i)
                 ends.append(ei)
 
     return Pairs(begins, ends)
+
 
 def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
     """Given a list of spans sorted in descending order, return the indexes of
@@ -133,20 +141,21 @@ def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
     # sort idxs by order in doc
     selected = sorted(selected, key=lambda idx: (starts[idx], ends[idx]))
     while len(selected) < limit:
-        selected.append(selected[0]) # this seems a bit weird?
+        selected.append(selected[0])  # this seems a bit weird?
     return selected
 
+
 def get_clusters_from_doc(doc) -> List[List[Tuple[int, int]]]:
-    """Given a Doc, convert the cluster spans to simple int tuple lists.
-    """
+    """Given a Doc, convert the cluster spans to simple int tuple lists."""
     out = []
     for key, val in doc.spans.items():
         cluster = []
         for span in val:
             # TODO check that there isn't an off-by-one error here
-            cluster.append( (span.start, span.end) )
+            cluster.append((span.start, span.end))
         out.append(cluster)
     return out
+
 
 def make_clean_doc(nlp, doc):
     """Return a doc with raw data but not span annotations."""
@@ -157,7 +166,10 @@ def make_clean_doc(nlp, doc):
     out = Doc(nlp.vocab, words=words, sent_starts=sents)
     return out
 
-def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]) -> List[List[bool]]:
+
+def create_gold_scores(
+    ments: Ints2d, clusters: List[List[Tuple[int, int]]]
+) -> List[List[bool]]:
     """Given mentions considered for antecedents and gold clusters,
     construct a gold score matrix."""
     # make a mapping of mentions to cluster id
@@ -176,22 +188,19 @@ def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]) -> 
             continue
 
         # this might change if no real antecedent is a candidate
-        row = [False] 
+        row = [False]
         cid = ment2cid[ment]
         for jj, ante in enumerate(mentuples):
             # antecedents must come first
-            if jj >= ii: 
+            if jj >= ii:
                 row.append(False)
                 continue
 
             row.append(cid == ment2cid.get(ante, -1))
 
         if not any(row):
-            row[0] = True # dummy
+            row[0] = True  # dummy
         out.append(row)
 
     # caller needs to convert to array
     return out
-
-
-
