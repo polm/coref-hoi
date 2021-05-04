@@ -1,13 +1,17 @@
 from typing import Tuple, List, Iterable, Optional, Dict, Callable, Any
 
-from thinc.types import Floats2d
-from thinc.api import Model, Config
+from thinc.types import Floats2d, Ints2d
+from thinc.api import Model, Config, Optimizer
 
 from spacy.tokens.doc import Doc
+from spacy.training import Example
 from spacy.pipeline.trainable_pipe import TrainablePipe
 from spacy.language import Language
 from spacy.vocab import Vocab
 from wasabi import Printer
+
+from coref_util import create_gold_scores, MentionClusters, get_clusters_from_doc
+
 
 default_config = """
 [model]
@@ -94,7 +98,7 @@ class CoreferenceResolver(TrainablePipe):
             score_idx = xp.argsort(-1 * cscores, 1)
 
             # need to add the dummy
-            dummy = model.ops.alloc2f(cscores.shape[0], 1)
+            dummy = self.model.ops.alloc2f(cscores.shape[0], 1)
             cscores = xp.concatenate((dummy, cscores), 1)
 
             predicted = get_predicted_clusters(xp, starts, ends, score_idx, cscores)
@@ -119,17 +123,18 @@ class CoreferenceResolver(TrainablePipe):
 
             ll = cscores.shape[0]
             hi = offset + ll
-            gscores = create_gold_scores(mention_idx[offset:hi], example.reference)
+            clusters = get_clusters_from_doc(example.reference)
+            gscores = create_gold_scores(mention_idx[offset:hi], clusters)
             # boolean to float
             gscores = ops.asarray2f(gscores)
             # add the dummy to cscores
-            dummy = model.ops.alloc2f(ll, 1)
+            dummy = self.model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((dummy, cscores), 1)
             with xp.errstate(divide="ignore"):
                 log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_norm = xp.logaddexp.reduce(cscores, 1)
 
-            diff = model.ops.asarray2f(cscores - gscores)
+            diff = self.model.ops.asarray2f(cscores - gscores)
             # remove the dummy, which doesn't backprop
             diff = diff[:, 1:]
             gradients.append(diff)

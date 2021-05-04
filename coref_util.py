@@ -4,6 +4,11 @@ from thinc.types import Pairs, Ints2d
 from spacy.tokens import Doc
 from typing import List, Tuple
 
+from icecream import ic
+
+# type alias to make writing this less tedious
+MentionClusters = List[List[Tuple[int, int]]]
+
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
     """Get the ID of the antecedent for each span. -1 if no antecedent."""
@@ -152,7 +157,7 @@ def make_clean_doc(nlp, doc):
     out = Doc(nlp.vocab, words=words, sent_starts=sents)
     return out
 
-def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]):
+def create_gold_scores(ments: Ints2d, clusters: List[List[Tuple[int, int]]]) -> List[List[bool]]:
     """Given mentions considered for antecedents and gold clusters,
     construct a gold score matrix."""
     # make a mapping of mentions to cluster id

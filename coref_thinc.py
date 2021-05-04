@@ -19,8 +19,6 @@ from coref_util import (
 
 from icecream import ic
 
-# type alias to make writing this less tedious
-MentionClusters = List[List[Tuple[int, int]]]
 
 
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
@@ -336,6 +334,8 @@ def ant_scorer_forward(
         backprops.append((source_b, target_b, source, target))
 
     def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
+        ic(dYs)
+        ic(len(dYs))
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         dXscores = ops.alloc1f(*mscores.shape)
@@ -479,13 +479,14 @@ def build_coref(
 
 def load_training_data(nlp, path):
     from spacy.tokens import DocBin
+    from spacy.training import Example
 
     db = DocBin().from_disk(path)
     docs = list(db.get_docs(nlp.vocab))
 
-    # TODO check if this has issues with gold tokenization
     raw = [make_clean_doc(nlp, doc) for doc in docs]
-    return raw, docs
+    examples = [Example(rr, dd) for rr, dd in zip(raw, docs)]
+    return examples
 
 
 def train_loop(nlp):
@@ -493,9 +494,9 @@ def train_loop(nlp):
     tok2vec = nlp.pipeline[0][1].model
 
     model = build_coref(tok2vec)
-    train_X, train_Y = load_training_data(nlp, "stuff.spacy")[:100]
+    examples = load_training_data(nlp, "stuff.spacy")[:100]
 
-    print(f"Loaded {len(train_X)} examples to train on")
+    print(f"Loaded {len(examples)} examples to train on")
 
     from thinc.api import Adam, fix_random_seed
     from tqdm import tqdm
@@ -505,21 +506,31 @@ def train_loop(nlp):
     batch_size = 32
     epochs = 10
 
-    for ii in range(epochs):
-        batches = model.ops.multibatch(batch_size, train_X, train_Y, shuffle=True)
-        for X, Y in tqdm(batches):
-            Yh, backprop = model.begin_update(X)
-            # Yh is List[List[List[Tuple[int, int]]]]
+    from coref_pipe import CoreferenceResolver
+    pipe = CoreferenceResolver(nlp.vocab, model)
 
-            clusters = [get_clusters_from_doc(yy) for yy in Y]
-            backprop(clusters)
+
+
+    for ii in range(epochs):
+        batches = model.ops.multibatch(batch_size, examples, shuffle=True)
+        for batch in tqdm(batches):
+            batch = batch[0] # XXX this seems wrong?
+
+            X = [ex.predicted for ex in batch]
+            Yh, backprop = model.begin_update(X)
+
+            #clusters = [get_clusters_from_doc(ex.reference) for ex in examples]
+            loss, gradients = pipe.get_loss(examples, *Yh)
+            # second parameter is ignored here since input is reused
+            backprop( (gradients, None) )
 
             model.finish_update(optimizer)
             print("Example:")
             print(X[0])
             for cluster in Yh[0]:
-                spans = [X[0][ss:ee].text for ss, ee in cluster]
-                print("::", *spans, sep=" | ")
+                ic(cluster)
+                #spans = [X[0][ss:ee].text for ss, ee in cluster]
+                #print("::", spans, sep=" | ")
         # TODO evaluate on dev data
         dev_X = train_X
         dev_Y = train_Y
