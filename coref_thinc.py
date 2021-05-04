@@ -448,26 +448,26 @@ def prep_model():
 
     span_embedder = build_span_embedder(get_candidate_mentions)
 
-    hidden = 1000
-    mention_scorer = chain(
-        Linear(nI=dim, nO=hidden),
-        Relu(nI=hidden, nO=hidden),
-        Dropout(0.3),
-        Linear(nI=hidden, nO=1),
-    )
-    mention_scorer.initialize()
+    with Model.define_operators({">>": chain, "&": tuplify}):
 
-    bilinear = chain(Linear(nI=dim, nO=dim), Dropout(0.3))
-    bilinear.initialize()
+        hidden = 1000
+        mention_scorer = (
+            Linear(nI=dim, nO=hidden)
+            >> Relu(nI=hidden, nO=hidden)
+            >> Dropout(0.3)
+            >> Linear(nI=hidden, nO=1)
+        )
+        mention_scorer.initialize()
 
-    with Model.define_operators({">>": chain}):
+        bilinear = Linear(nI=dim, nO=dim) >> Dropout(0.3)
+        bilinear.initialize()
 
         ms = build_take_vecs() >> mention_scorer
 
         model = (
-            tuplify(tok2vec, noop())
+            (tok2vec & noop())
             >> span_embedder
-            >> tuplify(ms, noop())
+            >> (ms & noop())
             >> build_coarse_pruner(3900)
             >> build_ant_scorer(bilinear, Dropout(0.3))
         )
