@@ -14,7 +14,7 @@ from coref_util import get_clusters_from_doc, make_clean_doc, create_gold_scores
 from icecream import ic
 
 # type alias to make writing htis less tedious
-MentionClusters = List[List[Tuple[int, int]]
+MentionClusters = List[List[Tuple[int, int]]]
 
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
@@ -423,11 +423,13 @@ def prep_model():
 
         ms = build_take_vecs() >> mention_scorer
  
-        model = tuplify(tok2vec, noop())
+        model = (
+                tuplify(tok2vec, noop())
                 >> span_embedder
                 >> tuplify(ms, noop())
                 >> build_coarse_pruner(3900)
                 >> build_ant_scorer(bilinear, Dropout(0.3))
+                )
     return model
 
 def load_training_data(nlp, path):
