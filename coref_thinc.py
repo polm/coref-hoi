@@ -390,9 +390,9 @@ def make_clusters(
         ends = idxs[offset:hi, 1].tolist()
         score_idx = xp.argsort(-1 * cscores, 1)
 
-        # need to add the dummy
-        dummy = model.ops.alloc2f(cscores.shape[0], 1)
-        cscores = xp.concatenate((dummy, cscores), 1)
+        # need to add the placeholder
+        placeholder = model.ops.alloc2f(cscores.shape[0], 1)
+        cscores = xp.concatenate((placeholder, cscores), 1)
         # ic(cscores.shape)
 
         predicted = get_predicted_clusters(xp, starts, ends, score_idx, cscores)
@@ -413,24 +413,24 @@ def make_clusters(
             # ic(gscores)
             # boolean to float
             gscores = model.ops.asarray2f(gscores)
-            # remove the dummy
+            # remove the placeholder
             # gscores = gscores[:,1:]
-            # add the dummy to cscores
-            dummy = model.ops.alloc2f(ll, 1)
-            cscores = xp.concatenate((dummy, cscores), 1)
+            # add the placeholder to cscores
+            placeholder = model.ops.alloc2f(ll, 1)
+            cscores = xp.concatenate((placeholder, cscores), 1)
             # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
             log_norm = logsumexp(xp, cscores, 1)
 
             # can probably save this somewhere
-            # dummy = model.ops.alloc2f(cscores.shape[0], 1)
-            # cscores = xp.concatenate( (dummy, cscores), 1)
+            # placeholder = model.ops.alloc2f(cscores.shape[0], 1)
+            # cscores = xp.concatenate( (placeholder, cscores), 1)
 
             # this shouldn't be necessary but for some reason one is a double and
             # one is a float.
             diff = model.ops.asarray2f(cscores - gscores)
-            # remove the dummy, which doesn't backprop
+            # remove the placeholder, which doesn't backprop
             diff = diff[:, 1:]
             dXs.append(diff)
 

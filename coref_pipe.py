@@ -102,9 +102,9 @@ class CoreferenceResolver(TrainablePipe):
             ends = idxs[offset:hi, 1].tolist()
             score_idx = xp.argsort(-1 * cscores, 1)
 
-            # need to add the dummy
-            dummy = self.model.ops.alloc2f(cscores.shape[0], 1)
-            cscores = xp.concatenate((dummy, cscores), 1)
+            # need to add the placeholder
+            placeholder = self.model.ops.alloc2f(cscores.shape[0], 1)
+            cscores = xp.concatenate((placeholder, cscores), 1)
 
             predicted = get_predicted_clusters(xp, starts, ends, score_idx, cscores)
             out.append(predicted)
@@ -132,16 +132,16 @@ class CoreferenceResolver(TrainablePipe):
             gscores = create_gold_scores(mention_idx[offset:hi], clusters)
             # boolean to float
             gscores = ops.asarray2f(gscores)
-            # add the dummy to cscores
-            dummy = self.model.ops.alloc2f(ll, 1)
-            cscores = xp.concatenate((dummy, cscores), 1)
+            # add the placeholder to cscores
+            placeholder = self.model.ops.alloc2f(ll, 1)
+            cscores = xp.concatenate((placeholder, cscores), 1)
             # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
             log_norm = logsumexp(xp, cscores, 1)
 
             diff = self.model.ops.asarray2f(cscores - gscores)
-            # remove the dummy, which doesn't backprop
+            # remove the placeholder, which doesn't backprop
             diff = diff[:, 1:]
             gradients.append(diff)
 

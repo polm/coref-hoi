@@ -195,7 +195,7 @@ def create_gold_scores(
     mentuples = [tuple(mm.tolist()) for mm in ments]
     for ii, ment in enumerate(mentuples):
         if ment not in ment2cid:
-            # this is not in a cluster so it's a dummy
+            # this is not in a cluster so it's a placeholder
             out.append([True] + ([False] * len(ments)))
             continue
 
@@ -211,7 +211,7 @@ def create_gold_scores(
             row.append(cid == ment2cid.get(ante, -1))
 
         if not any(row):
-            row[0] = True  # dummy
+            row[0] = True  # placeholder
         out.append(row)
 
     # caller needs to convert to array
