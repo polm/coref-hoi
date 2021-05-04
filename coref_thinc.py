@@ -441,25 +441,28 @@ def make_clusters(
     return out, backward
 
 
-def prep_model():
-    nlp = spacy.load("en_core_web_sm")
-    tok2vec = nlp.pipeline[0][1].model
-    dim = 96 * 3  # TODO get this from the model or something
+def build_coref(
+    tok2vec: Model,
+    mention_getter: Callable = get_candidate_mentions,
+    hidden: int = 1000,
+    dropout: float = 0.3,
+    mention_limit: int = 3900,
+):
+    dim = tok2vec.get_dim("nO") * 3
 
-    span_embedder = build_span_embedder(get_candidate_mentions)
+    span_embedder = build_span_embedder(mention_getter)
 
     with Model.define_operators({">>": chain, "&": tuplify}):
 
-        hidden = 1000
         mention_scorer = (
             Linear(nI=dim, nO=hidden)
             >> Relu(nI=hidden, nO=hidden)
-            >> Dropout(0.3)
+            >> Dropout(dropout)
             >> Linear(nI=hidden, nO=1)
         )
         mention_scorer.initialize()
 
-        bilinear = Linear(nI=dim, nO=dim) >> Dropout(0.3)
+        bilinear = Linear(nI=dim, nO=dim) >> Dropout(dropout)
         bilinear.initialize()
 
         ms = build_take_vecs() >> mention_scorer
@@ -468,8 +471,8 @@ def prep_model():
             (tok2vec & noop())
             >> span_embedder
             >> (ms & noop())
-            >> build_coarse_pruner(3900)
-            >> build_ant_scorer(bilinear, Dropout(0.3))
+            >> build_coarse_pruner(mention_limit)
+            >> build_ant_scorer(bilinear, Dropout(dropout))
         )
     return model
 
@@ -486,7 +489,10 @@ def load_training_data(nlp, path):
 
 
 def train_loop(nlp):
-    model = prep_model()
+    nlp = spacy.load("en_core_web_sm")
+    tok2vec = nlp.pipeline[0][1].model
+
+    model = build_coref(tok2vec)
     train_X, train_Y = load_training_data(nlp, "stuff.spacy")[:100]
 
     print(f"Loaded {len(train_X)} examples to train on")
