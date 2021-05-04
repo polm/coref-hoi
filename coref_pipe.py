@@ -59,15 +59,6 @@ class CoreferenceResolver(TrainablePipe):
 
         self.cfg = {}
 
-    def predict(self, docs: Iterable[Doc]):
-        """Apply the model without modifying the docs."""
-
-        clusters_by_doc = []
-        for i, doc in enumerate(docs):
-            clusters = self.model(doc, is_train=False)
-            clusters_by_doc.append(clusters)
-        return clusters_by_doc
-
     def set_annotations(self, docs: Iterable[Doc], clusters_by_doc) -> None:
         """Set the clusters on docs using predictions."""
 
