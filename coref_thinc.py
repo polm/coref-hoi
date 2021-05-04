@@ -20,7 +20,6 @@ from coref_util import (
 from icecream import ic
 
 
-
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
     names = [layer.name for layer in layers]
@@ -507,30 +506,22 @@ def train_loop(nlp):
     epochs = 10
 
     from coref_pipe import CoreferenceResolver
+
     pipe = CoreferenceResolver(nlp.vocab, model)
-
-
 
     for ii in range(epochs):
         batches = model.ops.multibatch(batch_size, examples, shuffle=True)
         for batch in tqdm(batches):
-            batch = batch[0] # XXX this seems wrong?
+            batch = batch[0]  # XXX this seems wrong?
 
             X = [ex.predicted for ex in batch]
             Yh, backprop = model.begin_update(X)
 
-            #clusters = [get_clusters_from_doc(ex.reference) for ex in examples]
             loss, gradients = pipe.get_loss(examples, *Yh)
             # second parameter is ignored here since input is reused
-            backprop( (gradients, None) )
+            backprop((gradients, None))
 
             model.finish_update(optimizer)
-            print("Example:")
-            print(X[0])
-            for cluster in Yh[0]:
-                ic(cluster)
-                #spans = [X[0][ss:ee].text for ss, ee in cluster]
-                #print("::", spans, sep=" | ")
         # TODO evaluate on dev data
         dev_X = train_X
         dev_Y = train_Y
