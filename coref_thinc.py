@@ -1,21 +1,17 @@
 from dataclasses import dataclass
 
-from thinc.api import Model, Linear, Relu, Dropout, chain, concatenate
-from thinc.api import list2ragged, reduce_mean, ragged2list, noop
-from thinc.types import Pairs, Floats2d, Floats1d, DTypesFloat, Ints2d, Ragged, Ints1d
-import spacy
-from spacy.tokens import Doc, Span
-from typing import cast, List, Callable, Any, Tuple
+from thinc.api import Model, Linear, Relu, Dropout, chain, noop
+from thinc.types import Floats2d, Floats1d, Ints2d, Ragged
+from spacy.tokens import Doc
+from typing import List, Callable, Tuple
 
-from collections import namedtuple
 from coref_util import (
     get_predicted_clusters,
     get_candidate_mentions,
     select_non_crossing_spans,
-    get_clusters_from_doc,
     make_clean_doc,
     create_gold_scores,
-    logsumexp
+    logsumexp,
 )
 
 from icecream import ic
@@ -71,21 +67,28 @@ class SpanEmbeddings:
         return SpanEmbeddings(self.indices, Ragged(out, self.vectors.lengths))
 
     def __iadd__(self, right):
+        # ic(type(self.vectors.data), type(right.vectors.data))
+        # XXX this doesn't work on gpu because the right ends up as a
+        # MemoryPointer. Probably happening in the tuplify backprop.
         self.vectors.data += right.vectors.data
         return self
 
 
 # model converting a Doc/Mention to span embeddings
-# mention_generator: Callable[Doc, Pairs[int]]
+# get_mentions: Callable[Doc, Pairs[int]]
 def build_span_embedder(
-    mention_generator,
+    get_mentions: Callable,
+    max_span_width: int = 20,
 ) -> Model[Tuple[List[Floats2d], List[Doc]], SpanEmbeddings]:
 
     return Model(
         "SpanEmbedding",
         forward=span_embeddings_forward,
         attrs={
-            "mention_generator": mention_generator,
+            "get_mentions": get_mentions,
+            # XXX might be better to make this an implicit parameter in the
+            # mention generator
+            "max_span_width": max_span_width,
         },
     )
 
@@ -100,14 +103,15 @@ def span_embeddings_forward(
 
     dim = tokvecs[0].shape[1]
 
-    mgen = model.attrs["mention_generator"]
+    get_mentions = model.attrs["get_mentions"]
+    max_span_width = model.attrs["max_span_width"]
     mentions = ops.alloc2i(0, 2)
     total_length = 0
     docmenlens = []  # number of mentions per doc
     for doc in docs:
-        mm = mgen(doc)
-        docmenlens.append(len(mm))
-        cments = ops.asarray2i([mm.one, mm.two]).transpose()
+        starts, ends = get_mentions(doc, max_span_width)
+        docmenlens.append(len(starts))
+        cments = ops.asarray2i([starts, ends]).transpose()
 
         mentions = xp.concatenate((mentions, cments + total_length))
         total_length += len(doc)
@@ -115,7 +119,6 @@ def span_embeddings_forward(
     # TODO support attention here
     tokvecs = xp.concatenate(tokvecs)
     spans = [tokvecs[ii:jj] for ii, jj in mentions.tolist()]
-    idx = 10
     avgs = [xp.mean(ss, axis=0) for ss in spans]
     spanvecs = ops.asarray2f(avgs)
 
@@ -163,7 +166,6 @@ def span_embeddings_forward(
     return SpanEmbeddings(mentions, embeds), backprop_span_embed
 
 
-# SpanEmbeddings -> SpanEmbeddings
 def build_coarse_pruner(
     mention_limit: int,
 ) -> Model[SpanEmbeddings, SpanEmbeddings]:
@@ -180,12 +182,12 @@ def build_coarse_pruner(
 def coarse_prune(
     model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train
 ) -> SpanEmbeddings:
-    # input spanembeddings are *all* candidate mentions
-    # output spanembeddings are *pruned* mentions
-    # do scoring
+    """Given scores for mention, output the top non-crossing mentions.
+
+    Mentions can contain other mentions, but candidate mentions cannot cross each other.
+    """
     rawscores, spanembeds = inputs
     scores = rawscores.squeeze()
-    # do pruning
     mention_limit = model.attrs["mention_limit"]
     # XXX: Issue here. Don't need docs to find crossing spans, but might for the limits.
     # In old code the limit can be:
@@ -201,11 +203,10 @@ def coarse_prune(
 
         # negate it so highest numbers come first
         tops = (model.ops.xp.argsort(-1 * cscores)).tolist()
-        # TODO this is wrong
         starts = spanembeds.indices[offset:hi, 0].tolist()
         ends = spanembeds.indices[offset:hi:, 1].tolist()
 
-        # selected is a 1d integer list
+        # csel is a 1d integer list
         csel = select_non_crossing_spans(tops, starts, ends, mention_limit)
         # add the offset so these indices are absolute
         csel = [ii + offset for ii in csel]
@@ -313,7 +314,7 @@ def ant_scorer_forward(
 
         # make a mask so antecedents precede referrents
         ant_range = xp.arange(0, cvecs.shape[0])
-        #with xp.errstate(divide="ignore"):
+        # with xp.errstate(divide="ignore"):
         #    mask = xp.log(
         #        (xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1
         #    ).astype(float)
@@ -417,7 +418,7 @@ def make_clusters(
             # add the dummy to cscores
             dummy = model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((dummy, cscores), 1)
-            #with xp.errstate(divide="ignore"):
+            # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
             log_norm = logsumexp(xp, cscores, 1)
@@ -449,10 +450,11 @@ def build_coref(
     hidden: int = 1000,
     dropout: float = 0.3,
     mention_limit: int = 3900,
+    max_span_width: int = 20,
 ):
     dim = tok2vec.get_dim("nO") * 3
 
-    span_embedder = build_span_embedder(get_mentions)
+    span_embedder = build_span_embedder(get_mentions, max_span_width)
 
     with Model.define_operators({">>": chain, "&": tuplify}):
 
@@ -493,14 +495,14 @@ def load_training_data(nlp, path):
 
 def train_loop(nlp):
     from thinc.api import require_gpu
-    require_gpu()
 
+    # require_gpu()
 
     nlp = spacy.load("en_core_web_sm")
     tok2vec = nlp.pipeline[0][1].model
 
     model = build_coref(tok2vec)
-    examples = load_training_data(nlp, "stuff.spacy")[:32 * 4]
+    examples = load_training_data(nlp, "stuff.spacy")[: 32 * 4]
 
     print(f"Loaded {len(examples)} examples to train on")
 
@@ -509,7 +511,7 @@ def train_loop(nlp):
 
     fix_random_seed(23)
     optimizer = Adam(0.001)
-    batch_size = 32
+    batch_size = 16
     epochs = 10
 
     from coref_pipe import CoreferenceResolver

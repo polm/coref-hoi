@@ -1,4 +1,4 @@
-from typing import Tuple, List, Iterable, Optional, Dict, Callable, Any
+from typing import List, Iterable, Optional, Dict
 
 from thinc.types import Floats2d, Ints2d
 from thinc.api import Model, Config, Optimizer
@@ -8,9 +8,14 @@ from spacy.training import Example
 from spacy.pipeline.trainable_pipe import TrainablePipe
 from spacy.language import Language
 from spacy.vocab import Vocab
-from wasabi import Printer
 
-from coref_util import create_gold_scores, MentionClusters, get_clusters_from_doc, logsumexp
+from coref_util import (
+    create_gold_scores,
+    MentionClusters,
+    get_clusters_from_doc,
+    logsumexp,
+    get_predicted_clusters,
+)
 
 
 default_config = """
@@ -130,7 +135,7 @@ class CoreferenceResolver(TrainablePipe):
             # add the dummy to cscores
             dummy = self.model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((dummy, cscores), 1)
-            #with xp.errstate(divide="ignore"):
+            # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
             log_norm = logsumexp(xp, cscores, 1)

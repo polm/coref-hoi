@@ -1,13 +1,12 @@
 # This is a new file for the spaCy model
 # it holds functions not directly part of the model
-from thinc.types import Pairs, Ints2d
+from thinc.types import Ints2d
 from spacy.tokens import Doc
 from typing import List, Tuple
 
-from icecream import ic
-
 # type alias to make writing this less tedious
 MentionClusters = List[List[Tuple[int, int]]]
+
 
 def logsumexp(xp, arr, axis=None):
     # from slide 5 here:
@@ -15,6 +14,7 @@ def logsumexp(xp, arr, axis=None):
     hi = arr.max(axis=axis)
     hi = xp.expand_dims(hi, 1)
     return hi + xp.log(xp.exp(arr - hi).sum(axis=axis))
+
 
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
@@ -82,7 +82,9 @@ def get_sentence_map(doc: Doc):
     return out
 
 
-def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
+def get_candidate_mentions(
+    doc: Doc, max_span_width: int = 20
+) -> Tuple[List[int], List[int]]:
     """Given a Doc, return candidate mentions.
 
     This isn't a trainable layer, it just returns raw candidates.
@@ -102,10 +104,12 @@ def get_candidate_mentions(doc: Doc, max_span_width: int = 20) -> Pairs[int]:
                 begins.append(tok.i)
                 ends.append(ei)
 
-    return Pairs(begins, ends)
+    return (begins, ends)
 
 
-def select_non_crossing_spans(idxs, starts, ends, limit) -> List[int]:
+def select_non_crossing_spans(
+    idxs: List[int], starts: List[int], ends: List[int], limit: int
+) -> List[int]:
     """Given a list of spans sorted in descending order, return the indexes of
     spans to keep, discarding spans that cross.
 
