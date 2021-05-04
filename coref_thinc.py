@@ -8,21 +8,28 @@ from spacy.tokens import Doc, Span
 from typing import cast, List, Callable, Any, Tuple
 
 from collections import namedtuple
-from coref_util import get_predicted_clusters, get_candidate_mentions, select_non_crossing_spans
-from coref_util import get_clusters_from_doc, make_clean_doc, create_gold_scores
+from coref_util import (
+    get_predicted_clusters,
+    get_candidate_mentions,
+    select_non_crossing_spans,
+    get_clusters_from_doc,
+    make_clean_doc,
+    create_gold_scores,
+)
 
 from icecream import ic
 
-# type alias to make writing htis less tedious
+# type alias to make writing this less tedious
 MentionClusters = List[List[Tuple[int, int]]]
+
 
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
     names = [layer.name for layer in layers]
     return Model(
-            "tuple(" + ", ".join(names) + ")", 
-            tuplify_forward, 
-            layers=layers,
+        "tuple(" + ", ".join(names) + ")",
+        tuplify_forward,
+        layers=layers,
     )
 
 
@@ -46,21 +53,21 @@ def tuplify_forward(model, X, is_train):
 
 @dataclass
 class SpanEmbeddings:
-    indices: Ints2d # Array with 2 columns (for start and end index)
-    vectors: Ragged # Ragged[Floats2d] # One vector per span
+    indices: Ints2d  # Array with 2 columns (for start and end index)
+    vectors: Ragged  # Ragged[Floats2d] # One vector per span
     # NB: We assume that the indices refer to a concatenated Floats2d that
     # has one row per token in the *batch* of documents. This makes it unambiguous
     # which row is in which document, because if the lengths are e.g. [10, 5],
     # a span starting at 11 must be starting at token 2 of doc 1. A bug could
     # potentially cause you to have a span which crosses a doc boundary though,
     # which would be bad.
-    # The lengths in the Ragged are not the tokens per doc, but the number of 
+    # The lengths in the Ragged are not the tokens per doc, but the number of
     # mentions per doc.
 
     def __add__(self, right):
         # XXX is something like this necessary?
-        #assert self.indices == right.indices, "Can only add with equal indices"
-        #assert self.vectors.lengths == right.vectors.lengths, "Can only add with equal lengths"
+        # assert self.indices == right.indices, "Can only add with equal indices"
+        # assert self.vectors.lengths == right.vectors.lengths, "Can only add with equal lengths"
 
         out = self.vectors.data + right.vectors.data
         return SpanEmbeddings(self.indices, Ragged(out, self.vectors.lengths))
@@ -70,17 +77,24 @@ class SpanEmbeddings:
         return self
 
 
-
 # model converting a Doc/Mention to span embeddings
 # mention_generator: Callable[Doc, Pairs[int]]
-def build_span_embedder(mention_generator) -> Model[Tuple[List[Floats2d], List[Doc]], SpanEmbeddings]:
-    
-    return Model("SpanEmbedding", 
-            forward=span_embeddings_forward, 
-            attrs={ "mention_generator": mention_generator, },
+def build_span_embedder(
+    mention_generator,
+) -> Model[Tuple[List[Floats2d], List[Doc]], SpanEmbeddings]:
+
+    return Model(
+        "SpanEmbedding",
+        forward=span_embeddings_forward,
+        attrs={
+            "mention_generator": mention_generator,
+        },
     )
 
-def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_train) -> SpanEmbeddings:
+
+def span_embeddings_forward(
+    model, inputs: Tuple[List[Floats2d], List[Doc]], is_train
+) -> SpanEmbeddings:
     ops = model.ops
     xp = ops.xp
 
@@ -91,13 +105,13 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
     mgen = model.attrs["mention_generator"]
     mentions = ops.alloc2i(0, 2)
     total_length = 0
-    docmenlens = [] # number of mentions per doc
+    docmenlens = []  # number of mentions per doc
     for doc in docs:
         mm = mgen(doc)
         docmenlens.append(len(mm))
         cments = ops.asarray2i([mm.one, mm.two]).transpose()
 
-        mentions = xp.concatenate( (mentions, cments + total_length) )
+        mentions = xp.concatenate((mentions, cments + total_length))
         total_length += len(doc)
 
     # TODO support attention here
@@ -106,15 +120,14 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
     idx = 10
     avgs = [xp.mean(ss, axis=0) for ss in spans]
     spanvecs = ops.asarray2f(avgs)
-    
-    # first and last token embeds
-    starts = [tokvecs[ii] for ii in mentions[:,0]]
-    ends   = [tokvecs[jj] for jj in mentions[:,1]]
 
+    # first and last token embeds
+    starts = [tokvecs[ii] for ii in mentions[:, 0]]
+    ends = [tokvecs[jj] for jj in mentions[:, 1]]
 
     starts = ops.asarray2f(starts)
-    ends   = ops.asarray2f(ends)
-    concat = xp.concatenate( (starts, ends, spanvecs), 1 )
+    ends = ops.asarray2f(ends)
+    concat = xp.concatenate((starts, ends, spanvecs), 1)
     embeds = Ragged(concat, docmenlens)
 
     def backprop_span_embed(dY: SpanEmbeddings) -> Tuple[List[Floats2d], List[Doc]]:
@@ -126,12 +139,12 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
         for indoc, mlen in zip(docs, dY.vectors.lengths):
             hi = offset + mlen
             hitok = tokoffset + len(indoc)
-            odocs.append(indoc) # no change
+            odocs.append(indoc)  # no change
             vecs = dY.vectors.data[offset:hi]
 
             starts = vecs[:, :dim]
-            ends = vecs[:, dim: 2 * dim]
-            spanvecs = vecs[:, 2 * dim:]
+            ends = vecs[:, dim : 2 * dim]
+            spanvecs = vecs[:, 2 * dim :]
 
             out = model.ops.alloc2f(len(indoc), dim)
 
@@ -154,17 +167,21 @@ def span_embeddings_forward(model, inputs: Tuple[List[Floats2d], List[Doc]], is_
 
 # SpanEmbeddings -> SpanEmbeddings
 def build_coarse_pruner(
-        mention_limit: int,
-        ) -> Model[SpanEmbeddings, SpanEmbeddings]:
-    model = Model("CoarsePruner",
-            forward=coarse_prune,
-            attrs={
-                "mention_limit": mention_limit,
-                },
-            )
+    mention_limit: int,
+) -> Model[SpanEmbeddings, SpanEmbeddings]:
+    model = Model(
+        "CoarsePruner",
+        forward=coarse_prune,
+        attrs={
+            "mention_limit": mention_limit,
+        },
+    )
     return model
 
-def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> SpanEmbeddings:
+
+def coarse_prune(
+    model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train
+) -> SpanEmbeddings:
     # input spanembeddings are *all* candidate mentions
     # output spanembeddings are *pruned* mentions
     # do scoring
@@ -172,7 +189,7 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
     scores = rawscores.squeeze()
     # do pruning
     mention_limit = model.attrs["mention_limit"]
-    #XXX: Issue here. Don't need docs to find crossing spans, but might for the limits.
+    # XXX: Issue here. Don't need docs to find crossing spans, but might for the limits.
     # In old code the limit can be:
     # - hard number per doc
     # - ratio of tokens in the doc
@@ -191,37 +208,38 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
         ends = spanembeds.indices[offset:hi:, 1].tolist()
 
         # selected is a 1d integer list
-        csel = select_non_crossing_spans(
-                tops, starts, ends, mention_limit)
+        csel = select_non_crossing_spans(tops, starts, ends, mention_limit)
         # add the offset so these indices are absolute
         csel = [ii + offset for ii in csel]
         # this should be constant because short choices are padded
         sellens.append(len(csel))
         selected += csel
         offset += menlen
-  
+
     selected = model.ops.asarray1i(selected)
     top_spans = spanembeds.indices[selected]
     top_vecs = spanembeds.vectors.data[selected]
 
     out = SpanEmbeddings(top_spans, Ragged(top_vecs, sellens))
 
-    def coarse_prune_backprop(dY: Tuple[Floats1d, SpanEmbeddings]) -> Tuple[Floats1d, SpanEmbeddings]:
+    def coarse_prune_backprop(
+        dY: Tuple[Floats1d, SpanEmbeddings]
+    ) -> Tuple[Floats1d, SpanEmbeddings]:
         ll = spanembeds.indices.shape[0]
 
         dYscores, dYembeds = dY
 
-        dXscores = model.ops.alloc1f(ll) 
-        #ic(dXscores.shape, selected.shape, dYscores.shape)
+        dXscores = model.ops.alloc1f(ll)
+        # ic(dXscores.shape, selected.shape, dYscores.shape)
         # I think we only backprop the selected ones here?
         # TODO check this
-        #dXscores[selected] = dYscores[selected]
+        # dXscores[selected] = dYscores[selected]
         # actually, maybe this is pass through?
         dXscores[selected] = dYscores.squeeze()
 
         dXvecs = model.ops.alloc2f(*spanembeds.vectors.data.shape)
-        #ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
-        #ic(spanembeds.indices.shape)
+        # ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
+        # ic(spanembeds.indices.shape)
         dXvecs[selected] = dYembeds.vectors.data
         dXembeds = SpanEmbeddings(spanembeds.indices, dXvecs)
 
@@ -232,9 +250,11 @@ def coarse_prune(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Sp
 
     return (scores[selected], out), coarse_prune_backprop
 
+
 def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
     # this just gets vectors out of spanembeddings
     return Model("TakeVecs", forward=take_vecs_forward)
+
 
 def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
     def backprop(dY: Floats2d) -> SpanEmbeddings:
@@ -243,37 +263,44 @@ def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
 
     return inputs.vectors.data, backprop
 
-def build_ant_scorer(bilinear, dropout, ant_limit=50) -> Model[SpanEmbeddings, List[Floats2d]]: 
-    return Model("AntScorer", 
-            forward=ant_scorer_forward,
-            layers=[bilinear, dropout],
-            attrs={
-                "ant_limit": ant_limit,
-                },
-            )
 
-def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train) -> Tuple[List[Floats2d], Ints2d]:
+def build_ant_scorer(
+    bilinear, dropout, ant_limit=50
+) -> Model[SpanEmbeddings, List[Floats2d]]:
+    return Model(
+        "AntScorer",
+        forward=ant_scorer_forward,
+        layers=[bilinear, dropout],
+        attrs={
+            "ant_limit": ant_limit,
+        },
+    )
+
+
+def ant_scorer_forward(
+    model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train
+) -> Tuple[List[Floats2d], Ints2d]:
     ops = model.ops
     xp = ops.xp
     # this contains the coarse bilinear in coref-hoi
     # coarse bilinear is a single layer linear network
-    #TODO make these proper refs
+    # TODO make these proper refs
     bilinear = model.layers[0]
     dropout = model.layers[1]
 
-    #XXX Note on dimensions: This won't work as a ragged because the floats2ds
+    # XXX Note on dimensions: This won't work as a ragged because the floats2ds
     # are not all the same dimentions. Each floats2d is a square in the size of
     # the number of antecedents in the document. Actually, that will have the
     # same size if antecedents are padded... Needs checking.
 
     mscores, sembeds = inputs
-    vecs = sembeds.vectors # ragged
+    vecs = sembeds.vectors  # ragged
 
     offset = 0
     backprops = []
     out = []
     for ll in vecs.lengths:
-        hi = offset+ll
+        hi = offset + ll
         # each iteration is one doc
 
         # first calculate the pairwise product scores
@@ -289,22 +316,24 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         # make a mask so antecedents precede referrents
         ant_range = xp.arange(0, cvecs.shape[0])
         with xp.errstate(divide="ignore"):
-            mask = xp.log((xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1).astype(float)
+            mask = xp.log(
+                (xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1
+            ).astype(float)
 
         scores = pw_prod + pw_sum + mask
         out.append(scores)
-        #TODO this should be topk'd 
+        # TODO this should be topk'd
         # this is the index in the original scores, which is also the mention index
-        #top_scores_idx = xp.argsort(-1 * scores, 1)[:,:ant_limit]
+        # top_scores_idx = xp.argsort(-1 * scores, 1)[:,:ant_limit]
         # These are the actual scores
-        #top_scores = scores[top_scores_idx]
-        #out.append( (top_scores, top_scores_idx) )
+        # top_scores = scores[top_scores_idx]
+        # out.append( (top_scores, top_scores_idx) )
 
         # In the full model these scores can be further refined. In the current
         # state of this model we're done here, so this pruning is less important.
 
         offset += ll
-        backprops.append( (source_b, target_b, source, target) )
+        backprops.append((source_b, target_b, source, target))
 
     def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
         dYscores, dYembeds = dYs
@@ -312,21 +341,23 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
         dXscores = ops.alloc1f(*mscores.shape)
 
         offset = 0
-        for dy, (source_b, target_b, source, target), ll in zip(dYscores, backprops, vecs.lengths):
-            #ic(dy.shape, source.shape, target.shape)
-            #ic(dy.dtype, source.dtype, target.dtype)
+        for dy, (source_b, target_b, source, target), ll in zip(
+            dYscores, backprops, vecs.lengths
+        ):
+            # ic(dy.shape, source.shape, target.shape)
+            # ic(dy.dtype, source.dtype, target.dtype)
 
             # first undo the mask so there are no infinite values
             dy[dy == -xp.inf] = 0
-            #ic(target)
-            #ic(dy)
-            #ic(xp.isnan(target).any(), xp.isnan(source).any(), xp.isnan(dy).any())
+            # ic(target)
+            # ic(dy)
+            # ic(xp.isnan(target).any(), xp.isnan(source).any(), xp.isnan(dy).any())
             dS = source_b(dy @ target)
             dT = target_b(dy @ source)
-            dXembeds.data[offset:offset+ll] = dS + dT
+            dXembeds.data[offset : offset + ll] = dS + dT
             # TODO really unsure about this, check it
-            dXscores[offset:offset+ll] = xp.diag(dy)
-            #ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
+            dXscores[offset : offset + ll] = xp.diag(dy)
+            # ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
             offset += ll
         # make it fit back into the linear
         dXscores = xp.expand_dims(dXscores, 1)
@@ -334,11 +365,14 @@ def ant_scorer_forward(model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train)
 
     return (out, sembeds.indices), backprop
 
+
 def build_cluster_maker() -> Model[List[Floats2d], Ints2d]:
     return Model("ClusterMaker", forward=make_clusters)
 
 
-def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Tuple[List[List[List[Tuple[int, int]]]], Callable]:
+def make_clusters(
+    model, inputs: Tuple[List[Floats2d], Ints2d], is_train
+) -> Tuple[List[List[List[Tuple[int, int]]]], Callable]:
     # one item in scores for each doc
     # output: per doc, one list of clusters, which are a list of int spans
     xp = model.ops.xp
@@ -356,15 +390,16 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Tup
 
         # need to add the dummy
         dummy = model.ops.alloc2f(cscores.shape[0], 1)
-        cscores = xp.concatenate( (dummy, cscores), 1)
-        #ic(cscores.shape)
+        cscores = xp.concatenate((dummy, cscores), 1)
+        # ic(cscores.shape)
 
-        predicted = get_predicted_clusters(
-                xp, starts, ends, score_idx, cscores)
-        #ic(predicted)
+        predicted = get_predicted_clusters(xp, starts, ends, score_idx, cscores)
+        # ic(predicted)
         out.append(predicted)
 
-    def backward(dY: List[List[List[Tuple[int, int]]]]) -> Tuple[List[Floats2d], Ints2d]:
+    def backward(
+        dY: List[List[List[Tuple[int, int]]]]
+    ) -> Tuple[List[Floats2d], Ints2d]:
         offset = 0
         dXs = []
         loss = 0
@@ -373,21 +408,21 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Tup
             ll = cscores.shape[0]
             hi = offset + ll
             gscores = create_gold_scores(idxs[offset:hi], docgold)
-            #ic(gscores)
+            # ic(gscores)
             # boolean to float
             gscores = model.ops.asarray2f(gscores)
             # remove the dummy
-            #gscores = gscores[:,1:]
+            # gscores = gscores[:,1:]
             # add the dummy to cscores
             dummy = model.ops.alloc2f(ll, 1)
-            cscores = xp.concatenate( (dummy, cscores), 1 )
+            cscores = xp.concatenate((dummy, cscores), 1)
             with xp.errstate(divide="ignore"):
                 log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
             log_norm = xp.logaddexp.reduce(cscores, 1)
 
             # can probably save this somewhere
-            #dummy = model.ops.alloc2f(cscores.shape[0], 1)
-            #cscores = xp.concatenate( (dummy, cscores), 1)
+            # dummy = model.ops.alloc2f(cscores.shape[0], 1)
+            # cscores = xp.concatenate( (dummy, cscores), 1)
 
             # this shouldn't be necessary but for some reason one is a double and
             # one is a float.
@@ -398,22 +433,28 @@ def make_clusters(model, inputs: Tuple[List[Floats2d], Ints2d], is_train) -> Tup
 
             # do loss calcs
             loss += xp.sum(log_norm - log_marg)
-            #ic(dXs[-1])
-            #ic(cscores.dtype, gscores.dtype, dXs[-1].dtype)
+            # ic(dXs[-1])
+            # ic(cscores.dtype, gscores.dtype, dXs[-1].dtype)
         print("Cluster loss: ", loss)
         return dXs, idxs
 
     return out, backward
 
+
 def prep_model():
     nlp = spacy.load("en_core_web_sm")
     tok2vec = nlp.pipeline[0][1].model
-    dim = 96 * 3 # TODO get this from the model or something
+    dim = 96 * 3  # TODO get this from the model or something
 
     span_embedder = build_span_embedder(get_candidate_mentions)
 
     hidden = 1000
-    mention_scorer = chain(Linear(nI=dim, nO=hidden), Relu(nI=hidden, nO=hidden), Dropout(0.3), Linear(nI=hidden, nO=1))
+    mention_scorer = chain(
+        Linear(nI=dim, nO=hidden),
+        Relu(nI=hidden, nO=hidden),
+        Dropout(0.3),
+        Linear(nI=hidden, nO=1),
+    )
     mention_scorer.initialize()
 
     bilinear = chain(Linear(nI=dim, nO=dim), Dropout(0.3))
@@ -422,15 +463,16 @@ def prep_model():
     with Model.define_operators({">>": chain}):
 
         ms = build_take_vecs() >> mention_scorer
- 
+
         model = (
-                tuplify(tok2vec, noop())
-                >> span_embedder
-                >> tuplify(ms, noop())
-                >> build_coarse_pruner(3900)
-                >> build_ant_scorer(bilinear, Dropout(0.3))
-                )
+            tuplify(tok2vec, noop())
+            >> span_embedder
+            >> tuplify(ms, noop())
+            >> build_coarse_pruner(3900)
+            >> build_ant_scorer(bilinear, Dropout(0.3))
+        )
     return model
+
 
 def load_training_data(nlp, path):
     from spacy.tokens import DocBin
@@ -438,9 +480,10 @@ def load_training_data(nlp, path):
     db = DocBin().from_disk(path)
     docs = list(db.get_docs(nlp.vocab))
 
-    #TODO check if this has issues with gold tokenization
+    # TODO check if this has issues with gold tokenization
     raw = [make_clean_doc(nlp, doc) for doc in docs]
     return raw, docs
+
 
 def train_loop(nlp):
     model = prep_model()
@@ -470,7 +513,7 @@ def train_loop(nlp):
             print(X[0])
             for cluster in Yh[0]:
                 spans = [X[0][ss:ee].text for ss, ee in cluster]
-                print('::', *spans, sep=" | ")
+                print("::", *spans, sep=" | ")
         # TODO evaluate on dev data
         dev_X = train_X
         dev_Y = train_Y
@@ -488,12 +531,11 @@ def train_loop(nlp):
 if __name__ == "__main__":
 
     import spacy
+
     nlp = spacy.load("en_core_web_sm")
 
     texts = [
-            "John called from London, he says it's raining in the city. He's all wet.",
-            "Tarou went to Tokyo Tower. It was sunny there.",
-            ]
+        "John called from London, he says it's raining in the city. He's all wet.",
+        "Tarou went to Tokyo Tower. It was sunny there.",
+    ]
     train_loop(nlp)
-
-
