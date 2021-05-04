@@ -15,6 +15,7 @@ from coref_util import (
     get_clusters_from_doc,
     make_clean_doc,
     create_gold_scores,
+    logsumexp
 )
 
 from icecream import ic
@@ -312,10 +313,13 @@ def ant_scorer_forward(
 
         # make a mask so antecedents precede referrents
         ant_range = xp.arange(0, cvecs.shape[0])
-        with xp.errstate(divide="ignore"):
-            mask = xp.log(
-                (xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1
-            ).astype(float)
+        #with xp.errstate(divide="ignore"):
+        #    mask = xp.log(
+        #        (xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1
+        #    ).astype(float)
+        mask = xp.log(
+            (xp.expand_dims(ant_range, 1) - xp.expand_dims(ant_range, 0)) >= 1
+        ).astype(float)
 
         scores = pw_prod + pw_sum + mask
         out.append(scores)
@@ -333,8 +337,6 @@ def ant_scorer_forward(
         backprops.append((source_b, target_b, source, target))
 
     def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
-        ic(dYs)
-        ic(len(dYs))
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         dXscores = ops.alloc1f(*mscores.shape)
@@ -415,9 +417,10 @@ def make_clusters(
             # add the dummy to cscores
             dummy = model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((dummy, cscores), 1)
-            with xp.errstate(divide="ignore"):
-                log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
-            log_norm = xp.logaddexp.reduce(cscores, 1)
+            #with xp.errstate(divide="ignore"):
+            #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
+            log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
+            log_norm = logsumexp(xp, cscores, 1)
 
             # can probably save this somewhere
             # dummy = model.ops.alloc2f(cscores.shape[0], 1)
@@ -442,14 +445,14 @@ def make_clusters(
 
 def build_coref(
     tok2vec: Model,
-    mention_getter: Callable = get_candidate_mentions,
+    get_mentions: Callable = get_candidate_mentions,
     hidden: int = 1000,
     dropout: float = 0.3,
     mention_limit: int = 3900,
 ):
     dim = tok2vec.get_dim("nO") * 3
 
-    span_embedder = build_span_embedder(mention_getter)
+    span_embedder = build_span_embedder(get_mentions)
 
     with Model.define_operators({">>": chain, "&": tuplify}):
 
@@ -489,11 +492,15 @@ def load_training_data(nlp, path):
 
 
 def train_loop(nlp):
+    from thinc.api import require_gpu
+    require_gpu()
+
+
     nlp = spacy.load("en_core_web_sm")
     tok2vec = nlp.pipeline[0][1].model
 
     model = build_coref(tok2vec)
-    examples = load_training_data(nlp, "stuff.spacy")[:100]
+    examples = load_training_data(nlp, "stuff.spacy")[:32 * 4]
 
     print(f"Loaded {len(examples)} examples to train on")
 
@@ -518,22 +525,11 @@ def train_loop(nlp):
             Yh, backprop = model.begin_update(X)
 
             loss, gradients = pipe.get_loss(examples, *Yh)
+            print("loss:", loss)
             # second parameter is ignored here since input is reused
             backprop((gradients, None))
 
             model.finish_update(optimizer)
-        # TODO evaluate on dev data
-        dev_X = train_X
-        dev_Y = train_Y
-        correct = 0
-        total = 0
-        for X, Y in model.ops.multibatch(batch_size, dev_X, dev_Y):
-            Yh = model.predict(X)
-            correct += (Yh.argmax(axis=1) == Y.argmax(axis=1)).sum()
-            total += Yh.shape[0]
-
-        score = correct / total
-        print(f" {i} accuracy: {float(score):.3f}")
 
 
 if __name__ == "__main__":

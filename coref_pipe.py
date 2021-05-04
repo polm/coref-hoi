@@ -10,7 +10,7 @@ from spacy.language import Language
 from spacy.vocab import Vocab
 from wasabi import Printer
 
-from coref_util import create_gold_scores, MentionClusters, get_clusters_from_doc
+from coref_util import create_gold_scores, MentionClusters, get_clusters_from_doc, logsumexp
 
 
 default_config = """
@@ -130,9 +130,10 @@ class CoreferenceResolver(TrainablePipe):
             # add the dummy to cscores
             dummy = self.model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((dummy, cscores), 1)
-            with xp.errstate(divide="ignore"):
-                log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
-            log_norm = xp.logaddexp.reduce(cscores, 1)
+            #with xp.errstate(divide="ignore"):
+            #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
+            log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
+            log_norm = logsumexp(xp, cscores, 1)
 
             diff = self.model.ops.asarray2f(cscores - gscores)
             # remove the dummy, which doesn't backprop

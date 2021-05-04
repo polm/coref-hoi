@@ -9,6 +9,13 @@ from icecream import ic
 # type alias to make writing this less tedious
 MentionClusters = List[List[Tuple[int, int]]]
 
+def logsumexp(xp, arr, axis=None):
+    # from slide 5 here:
+    # https://www.slideshare.net/ryokuta/cupy
+    hi = arr.max(axis=axis)
+    hi = xp.expand_dims(hi, 1)
+    return hi + xp.log(xp.exp(arr - hi).sum(axis=axis))
+
 # from model.py, refactored to be non-member
 def get_predicted_antecedents(xp, antecedent_idx, antecedent_scores):
     """Get the ID of the antecedent for each span. -1 if no antecedent."""
@@ -180,7 +187,8 @@ def create_gold_scores(
             ment2cid[ment] = cid
 
     out = []
-    mentuples = [tuple(mm) for mm in ments]
+    # The .tolist() call is necessary with cupy but not numpy
+    mentuples = [tuple(mm.tolist()) for mm in ments]
     for ii, ment in enumerate(mentuples):
         if ment not in ment2cid:
             # this is not in a cluster so it's a dummy
