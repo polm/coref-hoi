@@ -226,6 +226,7 @@ def coarse_prune(
     ) -> Tuple[Floats1d, SpanEmbeddings]:
         ll = spanembeds.indices.shape[0]
 
+        #ic(dY)
         dYscores, dYembeds = dY
 
         dXscores = model.ops.alloc1f(ll)
@@ -265,7 +266,8 @@ def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
 
 def build_ant_scorer(
     bilinear, dropout, ant_limit=50
-) -> Model[SpanEmbeddings, List[Floats2d]]:
+) -> Model[Tuple[Floats1d, SpanEmbeddings], 
+        List[Floats2d]]:
     return Model(
         "AntScorer",
         forward=ant_scorer_forward,
@@ -278,9 +280,11 @@ def build_ant_scorer(
 
 def ant_scorer_forward(
     model, inputs: Tuple[Floats1d, SpanEmbeddings], is_train
-) -> Tuple[List[Floats2d], Ints2d]:
+) -> Tuple[List[Tuple[Floats2d, Ints2d]], Ints2d]:
     ops = model.ops
     xp = ops.xp
+
+    ant_limit = model.attrs["ant_limit"]
     # this contains the coarse bilinear in coref-hoi
     # coarse bilinear is a single layer linear network
     # TODO make these proper refs
@@ -323,21 +327,24 @@ def ant_scorer_forward(
         ).astype(float)
 
         scores = pw_prod + pw_sum + mask
-        out.append(scores)
-        # TODO this should be topk'd
+        # out.append(scores)
+        # do the topk
         # this is the index in the original scores, which is also the mention index
-        # top_scores_idx = xp.argsort(-1 * scores, 1)[:,:ant_limit]
+        # XXX using argpartition + argsort here should be faster
+        top_scores_idx = xp.argsort(-1 * scores, 1)[:, :ant_limit]
         # These are the actual scores
-        # top_scores = scores[top_scores_idx]
-        # out.append( (top_scores, top_scores_idx) )
+        top_scores = xp.take_along_axis(scores, top_scores_idx, axis=1)
+        out.append((top_scores, top_scores_idx))
 
         # In the full model these scores can be further refined. In the current
-        # state of this model we're done here, so this pruning is less important.
+        # state of this model we're done here, so this pruning is less important,
+        # but it's still helpful for reducing memory usage (since scores can be 
+        # garbage collected when the loop exits).
 
         offset += ll
         backprops.append((source_b, target_b, source, target))
 
-    def backprop(dYs: Tuple[List[Floats2d], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
+    def backprop(dYs: Tuple[List[Tuple[Floats2d, Ints2d]], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         dXscores = ops.alloc1f(*mscores.shape)
@@ -346,19 +353,21 @@ def ant_scorer_forward(
         for dy, (source_b, target_b, source, target), ll in zip(
             dYscores, backprops, vecs.lengths
         ):
-            # ic(dy.shape, source.shape, target.shape)
-            # ic(dy.dtype, source.dtype, target.dtype)
+            # I'm not undoing the operations in the right order here. 
+            dyscore, dyidx = dy
+            #ic(dyidx.shape, dyscore.shape, source.shape, target.shape)
+            # the full score grid is square
+            fullscore = ops.alloc2f(ll, ll)
+            #ic(dyidx)
+            #ic(dyscore)
+            xp.put_along_axis(fullscore, dyidx, dyscore, 1)
 
-            # first undo the mask so there are no infinite values
-            dy[dy == -xp.inf] = 0
-            # ic(target)
-            # ic(dy)
-            # ic(xp.isnan(target).any(), xp.isnan(source).any(), xp.isnan(dy).any())
-            dS = source_b(dy @ target)
-            dT = target_b(dy @ source)
+            dS = source_b(fullscore @ target)
+            dT = target_b(fullscore @ source)
             dXembeds.data[offset : offset + ll] = dS + dT
             # TODO really unsure about this, check it
-            dXscores[offset : offset + ll] = xp.diag(dy)
+            #xp.set_along_axis(dXscores[offset : offset + ll], dyidx, xp.diag(dyscore))
+            dXscores[offset : offset + ll] = xp.diag(fullscore)
             # ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
             offset += ll
         # make it fit back into the linear
@@ -425,7 +434,7 @@ def train_loop(nlp):
     nlp = spacy.load("en_core_web_sm")
     tok2vec = nlp.pipeline[0][1].model
 
-    model = build_coref(tok2vec)
+    model = build_coref(tok2vec, mention_limit=500)
     examples = load_training_data(nlp, "stuff.spacy")[: 32 * 4]
 
     print(f"Loaded {len(examples)} examples to train on")
@@ -434,7 +443,7 @@ def train_loop(nlp):
     from tqdm import tqdm
 
     fix_random_seed(23)
-    optimizer = Adam(0.001)
+    optimizer = Adam(0.01)
     batch_size = 16
     epochs = 10
 

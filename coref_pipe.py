@@ -1,7 +1,7 @@
-from typing import List, Iterable, Optional, Dict
+from typing import List, Iterable, Optional, Dict, Tuple
 
 from thinc.types import Floats2d, Ints2d
-from thinc.api import Model, Config, Optimizer
+from thinc.api import Model, Config, Optimizer, CategoricalCrossentropy
 
 from spacy.tokens.doc import Doc
 from spacy.training import Example
@@ -18,11 +18,16 @@ from coref_util import (
 )
 
 
+from icecream import ic
+
 default_config = """
 [model]
 @architectures = "spacy.Coref.v0"
-config_name = "bert_small"
-model_path = "data/bert_small/model_Mar21_19-13-39_65000.bin"
+max_span_width = 20
+mention_limit = 3900
+dropout = 0.3
+hidden = 1000
+@get_mentions = "spacy.CorefCandidateGenerator.v0"
 """
 
 DEFAULT_MODEL = Config().from_str(default_config)["model"]
@@ -65,6 +70,7 @@ class CoreferenceResolver(TrainablePipe):
         self.model = model
         self.name = name
         self.span_cluster_prefix = span_cluster_prefix
+        self.loss = CategoricalCrossentropy()
 
         self.cfg = {}
 
@@ -114,7 +120,7 @@ class CoreferenceResolver(TrainablePipe):
         self,
         examples: Iterable[Example],
         # TODO convert next to ragged?
-        score_matrix: List[Floats2d],
+        score_matrix: List[Tuple[Floats2d, Ints2d]],
         mention_idx: Ints2d,
     ):
 
@@ -124,29 +130,57 @@ class CoreferenceResolver(TrainablePipe):
         offset = 0
         gradients = []
         loss = 0
-        for example, cscores in zip(examples, score_matrix):
+        for example, (cscores, cidx) in zip(examples, score_matrix):
+            # assume cids has absolute mention ids
 
             ll = cscores.shape[0]
             hi = offset + ll
+
             clusters = get_clusters_from_doc(example.reference)
             gscores = create_gold_scores(mention_idx[offset:hi], clusters)
+            gscores = xp.asarray(gscores)
+            top_gscores = xp.take_along_axis(gscores, cidx, axis=1)
+            #ic(cscores.shape, gscores.shape, top_gscores.shape)
+            # now add the placeholder
+            gold_placeholder = ~top_gscores.any(axis=1).T
+            gold_placeholder = xp.expand_dims(gold_placeholder, 1)
+            top_gscores = xp.concatenate((gold_placeholder, top_gscores), 1)
+
             # boolean to float
-            gscores = ops.asarray2f(gscores)
+            top_gscores = ops.asarray2f(top_gscores)
+
             # add the placeholder to cscores
             placeholder = self.model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((placeholder, cscores), 1)
+            #ic("later", cscores.shape, gscores.shape, top_gscores.shape)
             # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
-            log_marg = logsumexp(xp, cscores + xp.log(gscores), 1)
-            log_norm = logsumexp(xp, cscores, 1)
+            #log_norm = logsumexp(xp, cscores, 1)
+            #log_marg = logsumexp(xp, cscores + xp.log(top_gscores), 1)
 
-            diff = self.model.ops.asarray2f(cscores - gscores)
+            # why isn't this just equivalent to xp.log(top_gscores) + error?
+
+            #TODO check the math here
+            #diff = log_norm - log_marg
+            #diff = self.model.ops.asarray2f(cscores - top_gscores)
             # remove the placeholder, which doesn't backprop
+
+            # do softmax to cscores
+            cscores = ops.softmax(cscores, axis=1)
+            #ic(cscores)
+            #ic(cscores.shape)
+
+            diff = self.loss.get_grad(cscores, top_gscores)
+            #ic("before", diff.shape)
             diff = diff[:, 1:]
-            gradients.append(diff)
+            #ic("after", diff.shape)
+            gradients.append( (diff, cidx) )
 
             # scalar loss
-            loss += xp.sum(log_norm - log_marg)
+            #loss += xp.sum(log_norm - log_marg)
+            #ic(top_gscores)
+            loss += self.loss.get_loss(cscores, top_gscores)
+            offset += ll
         return loss, gradients
 
     def update(
