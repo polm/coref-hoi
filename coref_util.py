@@ -186,7 +186,7 @@ def create_gold_scores(
     ments: Ints2d, clusters: List[List[Tuple[int, int]]]
 ) -> List[List[bool]]:
     """Given mentions considered for antecedents and gold clusters,
-    construct a gold score matrix."""
+    construct a gold score matrix. This does not include the placeholder."""
     # make a mapping of mentions to cluster id
     # id is not important but equality will be
     ment2cid = {}
@@ -194,17 +194,18 @@ def create_gold_scores(
         for ment in cluster:
             ment2cid[ment] = cid
 
+    ll = len(ments)
     out = []
     # The .tolist() call is necessary with cupy but not numpy
     mentuples = [tuple(mm.tolist()) for mm in ments]
     for ii, ment in enumerate(mentuples):
         if ment not in ment2cid:
-            # this is not in a cluster so it's a placeholder
-            out.append([True] + ([False] * len(ments)))
+            # this is not in a cluster so it has no antecedent
+            out.append([False] * ll)
             continue
 
         # this might change if no real antecedent is a candidate
-        row = [False]
+        row = []
         cid = ment2cid[ment]
         for jj, ante in enumerate(mentuples):
             # antecedents must come first
@@ -214,9 +215,7 @@ def create_gold_scores(
 
             row.append(cid == ment2cid.get(ante, -1))
 
-        if not any(row):
-            row[0] = True  # placeholder
         out.append(row)
 
-    # caller needs to convert to array
+    # caller needs to convert to array, and add placeholder
     return out
