@@ -9,11 +9,15 @@ MentionClusters = List[List[Tuple[int, int]]]
 
 
 def logsumexp(xp, arr, axis=None):
+    """Emulate torch.logsumexp by returning the log of summed exponentials
+    along each row in the given dimension.
+
+    Reduces a 2d array to 1d."""
     # from slide 5 here:
     # https://www.slideshare.net/ryokuta/cupy
     hi = arr.max(axis=axis)
     hi = xp.expand_dims(hi, 1)
-    return hi + xp.log(xp.exp(arr - hi).sum(axis=axis))
+    return hi.squeeze() + xp.log(xp.exp(arr - hi).sum(axis=axis))
 
 
 # from model.py, refactored to be non-member
