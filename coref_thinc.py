@@ -58,17 +58,10 @@ class SpanEmbeddings:
     # mentions per doc.
 
     def __add__(self, right):
-        # XXX is something like this necessary?
-        # assert self.indices == right.indices, "Can only add with equal indices"
-        # assert self.vectors.lengths == right.vectors.lengths, "Can only add with equal lengths"
-
         out = self.vectors.data + right.vectors.data
         return SpanEmbeddings(self.indices, Ragged(out, self.vectors.lengths))
 
     def __iadd__(self, right):
-        # XXX this doesn't work on gpu because the right ends up as a
-        # MemoryPointer. Probably happening in the tuplify backprop.
-
         self.vectors.data += right.vectors.data
         return self
 
