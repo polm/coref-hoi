@@ -460,6 +460,8 @@ def train_loop(nlp):
 
             model.finish_update(optimizer)
 
+    model.to_disk("coref-model.bin")
+
 
 if __name__ == "__main__":
 
