@@ -15,6 +15,7 @@ from coref_util import (
 )
 
 
+# TODO replace this with thinc version once PR is in
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
     names = [layer.name for layer in layers]
@@ -67,6 +68,7 @@ class SpanEmbeddings:
     def __iadd__(self, right):
         # XXX this doesn't work on gpu because the right ends up as a
         # MemoryPointer. Probably happening in the tuplify backprop.
+
         self.vectors.data += right.vectors.data
         return self
 
@@ -230,7 +232,8 @@ def coarse_prune(
 
         dXvecs = model.ops.alloc2f(*spanembeds.vectors.data.shape)
         dXvecs[selected] = dYembeds.vectors.data
-        dXembeds = SpanEmbeddings(spanembeds.indices, dXvecs)
+        rout = Ragged(dXvecs, out.vectors.lengths)
+        dXembeds = SpanEmbeddings(spanembeds.indices, rout)
 
         # inflate for mention scorer
         dXscores = model.ops.xp.expand_dims(dXscores, 1)
@@ -242,10 +245,11 @@ def coarse_prune(
 
 def build_take_vecs() -> Model[SpanEmbeddings, Floats2d]:
     # this just gets vectors out of spanembeddings
+    # XXX Might be better to convert SpanEmbeddings to a tuple and use with_getitem
     return Model("TakeVecs", forward=take_vecs_forward)
 
 
-def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
+def take_vecs_forward(model, inputs: SpanEmbeddings, is_train) -> Floats2d:
     def backprop(dY: Floats2d) -> SpanEmbeddings:
         vecs = Ragged(dY, inputs.vectors.lengths)
         return SpanEmbeddings(inputs.indices, vecs)
