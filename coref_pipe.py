@@ -18,8 +18,6 @@ from coref_util import (
 )
 
 
-from icecream import ic
-
 default_config = """
 [model]
 @architectures = "spacy.Coref.v0"
@@ -140,7 +138,6 @@ class CoreferenceResolver(TrainablePipe):
             gscores = create_gold_scores(mention_idx[offset:hi], clusters)
             gscores = xp.asarray(gscores)
             top_gscores = xp.take_along_axis(gscores, cidx, axis=1)
-            #ic(cscores.shape, gscores.shape, top_gscores.shape)
             # now add the placeholder
             gold_placeholder = ~top_gscores.any(axis=1).T
             gold_placeholder = xp.expand_dims(gold_placeholder, 1)
@@ -152,33 +149,27 @@ class CoreferenceResolver(TrainablePipe):
             # add the placeholder to cscores
             placeholder = self.model.ops.alloc2f(ll, 1)
             cscores = xp.concatenate((placeholder, cscores), 1)
-            #ic("later", cscores.shape, gscores.shape, top_gscores.shape)
             # with xp.errstate(divide="ignore"):
             #    log_marg = xp.logaddexp.reduce(cscores + xp.log(gscores), 1)
-            #log_norm = logsumexp(xp, cscores, 1)
-            #log_marg = logsumexp(xp, cscores + xp.log(top_gscores), 1)
+            # log_norm = logsumexp(xp, cscores, 1)
+            # log_marg = logsumexp(xp, cscores + xp.log(top_gscores), 1)
 
             # why isn't this just equivalent to xp.log(top_gscores) + error?
 
-            #TODO check the math here
-            #diff = log_norm - log_marg
-            #diff = self.model.ops.asarray2f(cscores - top_gscores)
+            # TODO check the math here
+            # diff = log_norm - log_marg
+            # diff = self.model.ops.asarray2f(cscores - top_gscores)
             # remove the placeholder, which doesn't backprop
 
             # do softmax to cscores
             cscores = ops.softmax(cscores, axis=1)
-            #ic(cscores)
-            #ic(cscores.shape)
 
             diff = self.loss.get_grad(cscores, top_gscores)
-            #ic("before", diff.shape)
             diff = diff[:, 1:]
-            #ic("after", diff.shape)
-            gradients.append( (diff, cidx) )
+            gradients.append((diff, cidx))
 
             # scalar loss
-            #loss += xp.sum(log_norm - log_marg)
-            #ic(top_gscores)
+            # loss += xp.sum(log_norm - log_marg)
             loss += self.loss.get_loss(cscores, top_gscores)
             offset += ll
         return loss, gradients

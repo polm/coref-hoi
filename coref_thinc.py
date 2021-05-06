@@ -14,8 +14,6 @@ from coref_util import (
     logsumexp,
 )
 
-from icecream import ic
-
 
 def tuplify(layer1: Model, layer2: Model, *layers) -> Model:
     layers = (layer1, layer2) + layers
@@ -67,7 +65,6 @@ class SpanEmbeddings:
         return SpanEmbeddings(self.indices, Ragged(out, self.vectors.lengths))
 
     def __iadd__(self, right):
-        # ic(type(self.vectors.data), type(right.vectors.data))
         # XXX this doesn't work on gpu because the right ends up as a
         # MemoryPointer. Probably happening in the tuplify backprop.
         self.vectors.data += right.vectors.data
@@ -226,20 +223,12 @@ def coarse_prune(
     ) -> Tuple[Floats1d, SpanEmbeddings]:
         ll = spanembeds.indices.shape[0]
 
-        #ic(dY)
         dYscores, dYembeds = dY
 
         dXscores = model.ops.alloc1f(ll)
-        # ic(dXscores.shape, selected.shape, dYscores.shape)
-        # I think we only backprop the selected ones here?
-        # TODO check this
-        # dXscores[selected] = dYscores[selected]
-        # actually, maybe this is pass through?
         dXscores[selected] = dYscores.squeeze()
 
         dXvecs = model.ops.alloc2f(*spanembeds.vectors.data.shape)
-        # ic(dXscores.shape, dYscores.shape, dXvecs.shape, dYembeds.vectors.data.shape)
-        # ic(spanembeds.indices.shape)
         dXvecs[selected] = dYembeds.vectors.data
         dXembeds = SpanEmbeddings(spanembeds.indices, dXvecs)
 
@@ -266,8 +255,7 @@ def take_vecs_forward(model, inputs: SpanEmbeddings, is_train):
 
 def build_ant_scorer(
     bilinear, dropout, ant_limit=50
-) -> Model[Tuple[Floats1d, SpanEmbeddings], 
-        List[Floats2d]]:
+) -> Model[Tuple[Floats1d, SpanEmbeddings], List[Floats2d]]:
     return Model(
         "AntScorer",
         forward=ant_scorer_forward,
@@ -338,13 +326,15 @@ def ant_scorer_forward(
 
         # In the full model these scores can be further refined. In the current
         # state of this model we're done here, so this pruning is less important,
-        # but it's still helpful for reducing memory usage (since scores can be 
+        # but it's still helpful for reducing memory usage (since scores can be
         # garbage collected when the loop exits).
 
         offset += ll
         backprops.append((source_b, target_b, source, target))
 
-    def backprop(dYs: Tuple[List[Tuple[Floats2d, Ints2d]], Ints2d]) -> Tuple[Floats2d, SpanEmbeddings]:
+    def backprop(
+        dYs: Tuple[List[Tuple[Floats2d, Ints2d]], Ints2d]
+    ) -> Tuple[Floats2d, SpanEmbeddings]:
         dYscores, dYembeds = dYs
         dXembeds = Ragged(ops.alloc2f(*vecs.data.shape), vecs.lengths)
         dXscores = ops.alloc1f(*mscores.shape)
@@ -353,22 +343,18 @@ def ant_scorer_forward(
         for dy, (source_b, target_b, source, target), ll in zip(
             dYscores, backprops, vecs.lengths
         ):
-            # I'm not undoing the operations in the right order here. 
+            # I'm not undoing the operations in the right order here.
             dyscore, dyidx = dy
-            #ic(dyidx.shape, dyscore.shape, source.shape, target.shape)
             # the full score grid is square
             fullscore = ops.alloc2f(ll, ll)
-            #ic(dyidx)
-            #ic(dyscore)
             xp.put_along_axis(fullscore, dyidx, dyscore, 1)
 
             dS = source_b(fullscore @ target)
             dT = target_b(fullscore @ source)
             dXembeds.data[offset : offset + ll] = dS + dT
             # TODO really unsure about this, check it
-            #xp.set_along_axis(dXscores[offset : offset + ll], dyidx, xp.diag(dyscore))
+            # xp.set_along_axis(dXscores[offset : offset + ll], dyidx, xp.diag(dyscore))
             dXscores[offset : offset + ll] = xp.diag(fullscore)
-            # ic(dS.shape, dT.shape, ms.shape, pw_sum.shape, sum(vecs.lengths))
             offset += ll
         # make it fit back into the linear
         dXscores = xp.expand_dims(dXscores, 1)
@@ -434,8 +420,8 @@ def train_loop(nlp):
     nlp = spacy.load("en_core_web_sm")
     tok2vec = nlp.pipeline[0][1].model
 
-    model = build_coref(tok2vec, mention_limit=500)
-    examples = load_training_data(nlp, "stuff.spacy")[: 32 * 4]
+    model = build_coref(tok2vec, mention_limit=3900)
+    examples = load_training_data(nlp, "stuff.spacy")[: 32 * 16]
 
     print(f"Loaded {len(examples)} examples to train on")
 
