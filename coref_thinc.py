@@ -12,6 +12,7 @@ from coref_util import (
     make_clean_doc,
     create_gold_scores,
     logsumexp,
+    topk
 )
 
 
@@ -316,9 +317,10 @@ def ant_scorer_forward(
         # do the topk
         # this is the index in the original scores, which is also the mention index
         # XXX using argpartition + argsort here should be faster
-        top_scores_idx = xp.argsort(-1 * scores, 1)[:, :ant_limit]
+        #top_scores_idx = xp.argsort(-1 * scores, 1)[:, :ant_limit]
         # These are the actual scores
-        top_scores = xp.take_along_axis(scores, top_scores_idx, axis=1)
+        #top_scores = xp.take_along_axis(scores, top_scores_idx, axis=1)
+        top_scores, top_scores_idx = topk(xp, scores, ant_limit)
         out.append((top_scores, top_scores_idx))
 
         # In the full model these scores can be further refined. In the current

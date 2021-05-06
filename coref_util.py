@@ -7,6 +7,20 @@ from typing import List, Tuple
 # type alias to make writing this less tedious
 MentionClusters = List[List[Tuple[int, int]]]
 
+def topk(xp, arr, k, axis=None):
+    """Given and array and a k value, give the top values and idxs for each row.
+    """
+
+    part = xp.argpartition(arr, -k, axis=1)
+    idxs = xp.flip(part)[:, :k]
+
+    vals = xp.take_along_axis(arr, idxs, axis=1)
+
+    sidxs = xp.argsort(vals, axis=1)
+    # map these idxs back to the original
+    oidxs = xp.take_along_axis(idxs, sidxs, axis=1)
+    svals = xp.take_along_axis(vals, sidxs, axis=1)
+    return svals, oidxs
 
 def logsumexp(xp, arr, axis=None):
     """Emulate torch.logsumexp by returning the log of summed exponentials
