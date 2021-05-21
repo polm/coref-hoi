@@ -7,7 +7,7 @@ import re
 from collections import defaultdict
 
 import spacy
-from spacy.tokens import Doc
+from spacy.tokens import Doc, DocBin
 from icecream import ic
 
 DOCID_REGEX = "#begin document \((.*)\); part (\d*)"
@@ -15,11 +15,12 @@ DOCID_REGEX = "#begin document \((.*)\); part (\d*)"
 def convert_conll_doc_to_example(cdoc):
     pass
 
-def read_file(fname):
+def read_file(fname, outname):
     with open(fname) as infile:
         text = infile.read()
 
     nlp = spacy.blank("en")
+    db = DocBin()
 
     
     docs = text.split("\n#end document\n")
@@ -30,6 +31,7 @@ def read_file(fname):
 
         words = []
         sent_starts = []
+
         for sent in sents:
             lines = sent.split("\n")
             if name is None:
@@ -37,6 +39,9 @@ def read_file(fname):
                 # doc id line looks like this:
                 #begin document (/some/path); part 000
                 matches = re.match(DOCID_REGEX, top)
+                if not matches:
+                    # happens on the last line
+                    break
 
                 name = f"{matches.group(1)}_{matches.group(2)}"
 
@@ -79,10 +84,18 @@ def read_file(fname):
                             clustermap[cid].insert(0, (start, tokid + 1 ) )
         doc = Doc(nlp.vocab, words=words, sent_starts=sent_starts)
         for key, vals in clustermap.items():
-            spans = [doc[ss:ee].text for ss, ee in vals]
-            print(key)
+            spans = [doc[ss:ee] for ss, ee in vals]
+            skey = f"coref_clusters_{len(doc.spans) + 1}"
+            doc.spans[skey] = spans
+            #print(key)
             for val in vals:
-                print("    ", doc[val[0]: val[1]])
+                pass
+                #print("    ", doc[val[0]: val[1]])
+        db.add(doc)
+        if len(db) >= 100: break
+
+    print(f"Serializing {len(db)} documents")
+    db.to_disk(outname)
 
 if __name__ == "__main__":
-    read_file(sys.argv[1])
+    read_file(sys.argv[1], sys.argv[2])
