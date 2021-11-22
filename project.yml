@@ -21,6 +21,7 @@ assets:
 workflows:
   all_gpu:
     - data
+    - preprocess
     - train_gpu
     - evaluate
 
@@ -38,7 +39,7 @@ commands:
       - tar xvzf assets/conll2012-coref/conll-2012-train.v4.tar.gz -C assets/
       - tar xvzf assets/conll2012-coref/reference-coreference-scorers.v8.01.tar.gz -C assets/
       - rm -r assets/conll2012-coref # no longer needed
-      
+
       # fix script issues
       # For the shell script, be sure to use python2.
       - "sed -i 's:python:python2:' assets/conll-2012/v3/scripts/skeleton2conll.sh"
@@ -59,11 +60,15 @@ commands:
     outputs:
       - ${vars.train_file}
 
+  - name: "preprocess"
+    help: "Run the old prepreprocess script, which depends on seg_len."
+    script:
+      # This takes about a minute
+      - "python preprocess.py --input_dir assets --output_dir assets --seg_len ${vars.seg_len}"
+
   - name: "train_gpu"
     help: "Train the Coref model using a Transformer"
     script:
-      # prep segmented data the model requires
-      - "python preprocess.py --input_dir assets --output_dir assets --seg_len ${vars.seg_len}"
       - "python run.py ${vars.config_name} ${vars.gpu_id}"
     deps:
       - ${vars.train_file}
